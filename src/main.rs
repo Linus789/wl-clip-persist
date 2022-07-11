@@ -125,7 +125,7 @@ fn init_global_manager_with_seats(
                 if interface == seat_interface_name {
                     // Remove seat from list
                     seats2.deref().borrow_mut().remove(&id);
-                    log::trace!("Removed seat with id {}", id);
+                    log::trace!(target: &seat_target(id), "Removed seat");
                 }
             }
         }
@@ -241,7 +241,7 @@ fn init_seat(seat: &Main<WlSeat>, clipboard_manager: &Main<ZwlrDataControlManage
 
     // Put data device in the user data of its seat
     seat.as_ref().user_data().set(move || data_device);
-    log::trace!("Initialized seat with id {}", seat.as_ref().id());
+    log::trace!(target: &seat_target(seat.as_ref().id()), "Initialized seat");
 }
 
 /// Makes the selections for the given clipboard persistent.
@@ -350,6 +350,7 @@ fn handle_clipboard(clipboard_type: ClipboardType, display_name: Option<OsString
                 // If there is a primary selection offer, take it so it is only processed once
                 if let Some(event) = available_offers.primary_selection_offer.take() {
                     handle_selection_event(
+                        seat.as_ref().id(),
                         &display,
                         data_device,
                         &mut event_queue,
@@ -366,6 +367,7 @@ fn handle_clipboard(clipboard_type: ClipboardType, display_name: Option<OsString
                 // If there is a regular selection offer, take it so it is only processed once
                 if let Some(event) = available_offers.regular_selection_offer.take() {
                     handle_selection_event(
+                        seat.as_ref().id(),
                         &display,
                         data_device,
                         &mut event_queue,
@@ -398,6 +400,7 @@ struct FdIdentifier {
 /// and setting a new selection which reads the data from our own program.
 /// If this event was triggered by ourselves, we do not set a new selection.
 fn handle_selection_event(
+    seat_id: u32,
     display: &Display,
     data_device: &Main<ZwlrDataControlDeviceV1>,
     event_queue: &mut EventQueue,
@@ -406,7 +409,13 @@ fn handle_selection_event(
     fd_from_own_app: &Rc<RefCell<HashMap<FdIdentifier, bool>>>,
     primary_clipboard: bool,
 ) {
-    log::trace!("Handle new selection event");
+    let clipboard_type_str_start = if primary_clipboard { "Primary" } else { "Regular" };
+    let clipboard_type_str_lower = if primary_clipboard { "primary" } else { "regular" };
+    log::trace!(
+        target: &seat_target(seat_id),
+        "Handle new {} clipboard selection event",
+        clipboard_type_str_lower
+    );
 
     // Get all available mime types for that offer
     let mime_types = offer_event
@@ -478,7 +487,11 @@ fn handle_selection_event(
     let is_from_own_app = *fd_from_own_app.deref().borrow_mut().values().next().unwrap();
 
     if is_from_own_app {
-        log::trace!("Selection event was triggered by ourselves, so ignore it");
+        log::trace!(
+            target: &seat_target(seat_id),
+            "{} clipboard selection event was triggered by ourselves, so ignore it",
+            clipboard_type_str_start
+        );
         return;
     }
 
@@ -488,7 +501,12 @@ fn handle_selection_event(
         .filter_map(|(mime_type, read)| match read_with_timeout(read, READ_TIMEOUT) {
             Ok(data) => Some((mime_type, data)),
             Err(err) => {
-                log::warn!("{}", err);
+                log::warn!(
+                    target: &seat_target(seat_id),
+                    "{}\nIgnoring mime type: {}",
+                    err,
+                    mime_type
+                );
                 None
             }
         })
@@ -517,7 +535,9 @@ fn handle_selection_event(
             // Send the data as the specified mime type over the passed file descriptor, then close it.
             SourceEvent::Send { mime_type, fd } => {
                 log::trace!(
-                    "Data source {} received new request for mime type: {}",
+                    target: &seat_target(seat_id),
+                    "{} clipboard data source {} received new request for mime type: {}",
+                    clipboard_type_str_start,
                     data_source.as_ref().id(),
                     mime_type
                 );
@@ -533,7 +553,7 @@ fn handle_selection_event(
                 };
 
                 if let Some(is_from_own_app) = fd_from_own_app2.deref().borrow_mut().get_mut(&fd_identifier) {
-                    // File descriptor is from our own map, so we update the information
+                    // File descriptor is from our own app, so we update the information
                     *is_from_own_app = true;
                     // Explicitly close file descriptor
                     drop(fd_file);
@@ -558,7 +578,13 @@ fn handle_selection_event(
                     let write = unsafe { FileDescriptor::from_raw_fd(fd) };
 
                     if let Err(err) = write_with_timeout(write, data, WRITE_TIMEOUT) {
-                        log::warn!("{}", err);
+                        log::warn!(
+                            target: &seat_target(seat_id),
+                            "{}\nFailed to send {} clipboard data for mime type: {}",
+                            err,
+                            clipboard_type_str_lower,
+                            mime_type
+                        );
                     }
                 });
             }
@@ -569,7 +595,12 @@ fn handle_selection_event(
                 let data_source_id = data_source.as_ref().id();
                 // Destroy the current data source.
                 data_source.destroy();
-                log::trace!("Data source {} got destroyed", data_source_id);
+                log::trace!(
+                    target: &seat_target(seat_id),
+                    "Destroyed {} clipboard data source {}",
+                    clipboard_type_str_lower,
+                    data_source_id
+                );
             }
             _ => {}
         }
@@ -578,17 +609,16 @@ fn handle_selection_event(
     // Set selection to our data source
     if primary_clipboard {
         data_device.set_primary_selection(Some(&data_source));
-        log::trace!(
-            "Data source {} got created for primary clipboard",
-            data_source.as_ref().id()
-        );
     } else {
         data_device.set_selection(Some(&data_source));
-        log::trace!(
-            "Data source {} got created for regular clipboard",
-            data_source.as_ref().id()
-        );
     }
+
+    log::trace!(
+        target: &seat_target(seat_id),
+        "Created {} clipboard data source {}",
+        clipboard_type_str_lower,
+        data_source.as_ref().id(),
+    );
 }
 
 /// Reads the entire data from a file descriptor with timeout.
@@ -756,4 +786,8 @@ fn get_event_queue_error(display: &Display, method: EventQueueMethod) -> String 
     }
 
     default
+}
+
+fn seat_target(seat_id: u32) -> String {
+    format!("Seat {}", seat_id)
 }
