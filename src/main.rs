@@ -124,8 +124,9 @@ fn init_global_manager_with_seats(
             GlobalEvent::Removed { id, interface } => {
                 if interface == seat_interface_name {
                     // Remove seat from list
-                    seats2.deref().borrow_mut().remove(&id);
-                    log::trace!(target: &seat_target(id), "Removed seat");
+                    if seats2.deref().borrow_mut().remove(&id).is_some() {
+                        log::trace!(target: &seat_target(id), "Removed seat");
+                    }
                 }
             }
         }
@@ -263,9 +264,9 @@ fn handle_clipboard(clipboard_type: ClipboardType, display_name: Option<OsString
             Ok(display) => display,
             Err(err) => {
                 log::error!(
-                        "Failed to connect to a wayland server socket using the contents of the environment variables. Error: {}",
-                        err
-                    );
+                    "Failed to connect to a wayland server socket using the contents of the environment variables. Error: {}",
+                    err
+                );
                 std::process::exit(1);
             }
         },
@@ -276,9 +277,9 @@ fn handle_clipboard(clipboard_type: ClipboardType, display_name: Option<OsString
     let (global_manager, seats) = init_global_manager_with_seats(&wl_display, &clipboard_manager, clipboard_type);
 
     // Retrieve the global interfaces, otherwise it is not possible to create a clipboard manager instance
-    event_queue
-        .sync_roundtrip(&mut (), |_, _, _| {})
-        .unwrap_or_else(|_| panic!("{}", get_event_queue_error(&display, EventQueueMethod::SyncRoundtrip)));
+    EventQueueMethod::SyncRoundtrip
+        .run(&mut event_queue, &display)
+        .unwrap_or_else(|err| panic!("{}", err));
 
     // Tries to create a clipboard manager instance
     let clipboard_manager_version = if clipboard_type.primary() { 2 } else { 1 };
@@ -322,9 +323,9 @@ fn handle_clipboard(clipboard_type: ClipboardType, display_name: Option<OsString
 
     loop {
         // Get new events and inform about new selections
-        event_queue
-            .dispatch(&mut (), |_, _, _| {})
-            .unwrap_or_else(|_| panic!("{}", get_event_queue_error(&display, EventQueueMethod::Dispatch)));
+        EventQueueMethod::Dispatch
+            .run(&mut event_queue, &display)
+            .unwrap_or_else(|err| panic!("{}", err));
 
         // Handle selection offer for each seat
         for seat in seats.deref().borrow().values() {
@@ -471,12 +472,8 @@ fn handle_selection_event(
 
     // Others programs need to know we want to read some data,
     // so we can actually get the clipboard data.
-    if let Err(err) = event_queue.sync_roundtrip(&mut (), |_, _, _| {}) {
-        log::error!(
-            "{}. Error: {}",
-            get_event_queue_error(display, EventQueueMethod::SyncRoundtrip),
-            err
-        );
+    if let Err(err) = EventQueueMethod::SyncRoundtrip.run(event_queue, &display) {
+        log::error!("{}", err);
         return;
     }
 
@@ -772,20 +769,36 @@ enum EventQueueMethod {
     Dispatch,
 }
 
-/// Constructs an error message for cases where the event queue has failed.
-fn get_event_queue_error(display: &Display, method: EventQueueMethod) -> String {
-    let mut default = String::from("Event Queue: failed ");
+impl EventQueueMethod {
+    // Runs the given event queue method.
+    fn run(&self, event_queue: &mut EventQueue, display: &Display) -> Result<(), String> {
+        let result = match self {
+            EventQueueMethod::SyncRoundtrip => event_queue.sync_roundtrip(&mut (), |_, _, _| {}),
+            EventQueueMethod::Dispatch => event_queue.dispatch(&mut (), |_, _, _| {}),
+        };
 
-    match method {
-        EventQueueMethod::SyncRoundtrip => default += "synchronous roundtrip",
-        EventQueueMethod::Dispatch => default += "dispatch",
+        if let Err(err) = result {
+            return Err(format!("{}. Error: {}", self.get_event_queue_error(display), err));
+        }
+
+        Ok(())
     }
 
-    if let Some(protocol_error) = display.protocol_error() {
-        default += &format!(". Last Protocol Error: {:?}", protocol_error);
-    }
+    /// Constructs an error message for cases where the event queue has failed.
+    fn get_event_queue_error(&self, display: &Display) -> String {
+        let mut default = String::from("Event Queue: failed ");
 
-    default
+        match self {
+            EventQueueMethod::SyncRoundtrip => default += "synchronous roundtrip",
+            EventQueueMethod::Dispatch => default += "dispatch",
+        }
+
+        if let Some(protocol_error) = display.protocol_error() {
+            default += &format!(". Last Protocol Error: {:?}", protocol_error);
+        }
+
+        default
+    }
 }
 
 fn seat_target(seat_id: u32) -> String {
