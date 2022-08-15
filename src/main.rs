@@ -619,7 +619,6 @@ fn handle_selection_event(
 }
 
 /// Reads the entire data from a file descriptor with timeout.
-/// In the worst case, the timeout is twice as long.
 fn read_with_timeout(mut file: FileDescriptor, timeout: Duration) -> Result<Vec<u8>, String> {
     if let Err(err) = file.set_non_blocking(true) {
         return Err(format!(
@@ -636,11 +635,20 @@ fn read_with_timeout(mut file: FileDescriptor, timeout: Duration) -> Result<Vec<
 
     let mut result = Vec::with_capacity(32);
     let mut buf = [0u8; 8192];
-    let timeout_millis = timeout.as_millis().try_into().unwrap();
-    let now = Instant::now();
+    let end_time = Instant::now() + timeout;
 
     loop {
-        match unsafe { libc::poll(&mut pfd, 1, timeout_millis) } {
+        let remaining_time = end_time
+            .saturating_duration_since(Instant::now())
+            .as_millis()
+            .try_into()
+            .unwrap();
+
+        if remaining_time == 0 {
+            return Err("Timed out reading from file descriptor".to_string());
+        }
+
+        match unsafe { libc::poll(&mut pfd, 1, remaining_time) } {
             0 => {
                 return Err("Timed out reading from file descriptor".to_string());
             }
@@ -651,26 +659,20 @@ fn read_with_timeout(mut file: FileDescriptor, timeout: Duration) -> Result<Vec<
                     errno
                 ));
             }
-            1.. => {
-                if now.elapsed() > timeout {
-                    return Err("Timed out reading from file descriptor".to_string());
+            1.. => match file.read(&mut buf) {
+                Ok(size) if size == 0 => {
+                    break;
                 }
-
-                match file.read(&mut buf) {
-                    Ok(size) if size == 0 => {
-                        break;
-                    }
-                    Ok(size) => {
-                        result.extend_from_slice(&buf[..size]);
-                    }
-                    Err(ref e) if e.kind() == ErrorKind::Interrupted => {
-                        continue;
-                    }
-                    Err(err) => {
-                        return Err(format!("Error while reading from file descriptor: {}", err));
-                    }
+                Ok(size) => {
+                    result.extend_from_slice(&buf[..size]);
                 }
-            }
+                Err(ref e) if e.kind() == ErrorKind::Interrupted => {
+                    continue;
+                }
+                Err(err) => {
+                    return Err(format!("Error while reading from file descriptor: {}", err));
+                }
+            },
             _ => {
                 return Err("Received invalid return type from polling to read from the file descriptor".to_string());
             }
@@ -681,7 +683,6 @@ fn read_with_timeout(mut file: FileDescriptor, timeout: Duration) -> Result<Vec<
 }
 
 /// Writes the entire data to a file descriptor with timeout.
-/// In the worst case, the timeout is twice as long.
 fn write_with_timeout(mut file: FileDescriptor, data: &[u8], timeout: Duration) -> Result<(), String> {
     if let Err(err) = file.set_non_blocking(true) {
         return Err(format!(
@@ -697,11 +698,20 @@ fn write_with_timeout(mut file: FileDescriptor, data: &[u8], timeout: Duration) 
     };
 
     let mut buf = data;
-    let timeout_millis = timeout.as_millis().try_into().unwrap();
-    let now = Instant::now();
+    let end_time = Instant::now() + timeout;
 
     while !buf.is_empty() {
-        match unsafe { libc::poll(&mut pfd, 1, timeout_millis) } {
+        let remaining_time = end_time
+            .saturating_duration_since(Instant::now())
+            .as_millis()
+            .try_into()
+            .unwrap();
+
+        if remaining_time == 0 {
+            return Err("Timed out writing from file descriptor".to_string());
+        }
+
+        match unsafe { libc::poll(&mut pfd, 1, remaining_time) } {
             0 => {
                 return Err("Timed out writing to file descriptor".to_string());
             }
@@ -712,26 +722,20 @@ fn write_with_timeout(mut file: FileDescriptor, data: &[u8], timeout: Duration) 
                     errno
                 ));
             }
-            1.. => {
-                if now.elapsed() > timeout {
-                    return Err("Timed out writing to file descriptor".to_string());
+            1.. => match file.write(buf) {
+                Ok(size) if size == 0 => {
+                    return Err("Failed to write whole buffer to the file descriptor".to_string());
                 }
-
-                match file.write(buf) {
-                    Ok(size) if size == 0 => {
-                        return Err("Failed to write whole buffer to the file descriptor".to_string());
-                    }
-                    Ok(size) => {
-                        buf = &buf[size..];
-                    }
-                    Err(ref e) if e.kind() == ErrorKind::Interrupted => {
-                        continue;
-                    }
-                    Err(err) => {
-                        return Err(format!("Error while writing to file descriptor: {}", err));
-                    }
+                Ok(size) => {
+                    buf = &buf[size..];
                 }
-            }
+                Err(ref e) if e.kind() == ErrorKind::Interrupted => {
+                    continue;
+                }
+                Err(err) => {
+                    return Err(format!("Error while writing to file descriptor: {}", err));
+                }
+            },
             _ => {
                 return Err("Received invalid return type from polling to write to the file descriptor".to_string());
             }
