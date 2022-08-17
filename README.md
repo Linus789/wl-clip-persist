@@ -24,10 +24,10 @@ RUST_LOG=trace wl-clip-persist --clipboard regular
 
 ## Build from source
 * Install `rustup` to get the `rust` compiler installed on your system. [Install rustup](https://www.rust-lang.org/en-US/install.html)
-* Rust version 1.56.1 or later is required
+* Rust version 1.61.0 or later is required
 * Build in release mode: `cargo build --release`
 * The resulting executable can be found at `target/release/wl-clip-persist`
 
 ## Thanks
 * [wl-clipboard-rs](https://github.com/YaLTeR/wl-clipboard-rs) for showing how to interact with the Wayland clipboard
-* [wezterm](https://github.com/wez/wezterm) for the read and write functions with timeouts
+* [wezterm](https://github.com/wez/wezterm) for the initial read and write functions with timeouts
