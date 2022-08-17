@@ -3,6 +3,7 @@ use std::cell::RefCell;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
+use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{ErrorKind, Read, Write};
 use std::ops::Deref;
@@ -473,7 +474,7 @@ fn handle_selection_event(
 
     // Others programs need to know we want to read some data,
     // so we can actually get the clipboard data.
-    if let Err(err) = EventQueueMethod::SyncRoundtrip.run(event_queue, &display) {
+    if let Err(err) = EventQueueMethod::SyncRoundtrip.run(event_queue, display) {
         log::error!("{}", err);
         return;
     }
@@ -909,7 +910,7 @@ impl EventQueueMethod {
         }
 
         if let Some(protocol_error) = display.protocol_error() {
-            default += &format!(". Last Protocol Error: {:?}", protocol_error);
+            let _ = write!(default, ". Last Protocol Error: {:?}", protocol_error);
         }
 
         default
