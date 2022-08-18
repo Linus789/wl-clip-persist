@@ -816,12 +816,12 @@ fn write_with_timeout(mut file: FileDescriptor, mut data: &[u8], timeout: Durati
             .unwrap();
 
         if remaining_time == 0 {
-            return Err("Timed out writing from file descriptor".into());
+            return Err("Timed out writing to file descriptor".into());
         }
 
         match unsafe { libc::poll(&mut pfd, 1, remaining_time) } {
             0 => {
-                return Err("Timed out writing from file descriptor".into());
+                return Err("Timed out writing to file descriptor".into());
             }
             -1 => {
                 let errno = std::io::Error::last_os_error();
