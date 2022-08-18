@@ -93,8 +93,8 @@ fn init_global_manager_with_seats(
     let seats2 = seats.clone();
     let clipboard_manager2 = clipboard_manager.clone();
     let global_manager = GlobalManager::new_with_cb(display, move |global_event, registry, dispatch_data| {
-        let seat_interface_name = WlSeat::NAME;
-        let seat_min_version = 2;
+        const SEAT_INTERFACE_NAME: &str = WlSeat::NAME;
+        const SEAT_MIN_VERSION: u32 = 2;
 
         let mut global_implementor = |seat: Main<WlSeat>, _: DispatchData| {
             // Seems to be a seat that got added later, so initialize it
@@ -113,8 +113,8 @@ fn init_global_manager_with_seats(
         match global_event {
             // A new global was created
             GlobalEvent::New { id, interface, version } => {
-                if interface == seat_interface_name {
-                    if version < seat_min_version {
+                if interface == SEAT_INTERFACE_NAME {
+                    if version < SEAT_MIN_VERSION {
                         GlobalImplementor::<WlSeat>::error(&mut global_implementor, version, dispatch_data);
                     } else {
                         let proxy = registry.bind::<WlSeat>(version, id);
@@ -124,7 +124,7 @@ fn init_global_manager_with_seats(
             }
             // A global was removed
             GlobalEvent::Removed { id, interface } => {
-                if interface == seat_interface_name {
+                if interface == SEAT_INTERFACE_NAME {
                     // Remove seat from list
                     if seats2.deref().borrow_mut().remove(&id).is_some() {
                         log::trace!(target: &seat_target(id), "Removed seat");
