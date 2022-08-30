@@ -105,7 +105,7 @@ fn init_global_manager_with_seats(
             // Add seat to list
             let seat_id = seat.as_ref().id();
 
-            if seats2.deref().borrow_mut().insert(seat_id, seat).is_some() {
+            if seats2.deref().borrow_mut().insert(seat_id, seat).is_some() { //TODO
                 panic!("A seat with the same id {} was already present", seat_id);
             }
         };
@@ -234,7 +234,7 @@ fn init_seat(seat: &Main<WlSeat>, clipboard_manager: &Main<ZwlrDataControlManage
             DeviceEvent::Finished => {
                 // Set the data device in the seat's user data to None,
                 // so it is no longer available.
-                *data_device2.deref().borrow_mut() = None;
+                *data_device2.deref().borrow_mut() = None; // TODO
                 // Destroy this data device
                 data_device.destroy();
             }
@@ -337,6 +337,7 @@ fn handle_clipboard(clipboard_type: ClipboardType, display_name: Option<OsString
                 .user_data()
                 .get::<Rc<RefCell<Option<Main<ZwlrDataControlDeviceV1>>>>>()
                 .unwrap()
+                .deref()
                 .borrow()
                 .as_ref()
             {
@@ -347,11 +348,21 @@ fn handle_clipboard(clipboard_type: ClipboardType, display_name: Option<OsString
                     .get::<RefCell<AvailableOffers>>()
                     .unwrap()
                     .borrow_mut();
+                let primary_selection_offer = available_offers.primary_selection_offer.take();
+                let regular_selection_offer = available_offers.regular_selection_offer.take();
+                // Avoid already mutably borrowed error, which happens when
+                // 1. you do not drop the available offers here
+                // 2. make a synchronous roundtrip (to notify others that we want to get the clipboard)
+                // 3. during that synchronous roundtrip, we are notified of a new available offer,
+                //    so that the available offers are mutably borrowed again
+                // Therefore, drop the available offers.
+                drop(available_offers);
+
                 let clipboard_manager_ref = clipboard_manager.deref().borrow();
                 let clipboard_manager_instance = clipboard_manager_ref.as_ref().unwrap();
 
                 // If there is a primary selection offer, take it so it is only processed once
-                if let Some(event) = available_offers.primary_selection_offer.take() {
+                if let Some(event) = primary_selection_offer {
                     handle_selection_event(
                         seat.as_ref().id(),
                         &display,
@@ -368,7 +379,7 @@ fn handle_clipboard(clipboard_type: ClipboardType, display_name: Option<OsString
                 }
 
                 // If there is a regular selection offer, take it so it is only processed once
-                if let Some(event) = available_offers.regular_selection_offer.take() {
+                if let Some(event) = regular_selection_offer {
                     handle_selection_event(
                         seat.as_ref().id(),
                         &display,
