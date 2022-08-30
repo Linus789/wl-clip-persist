@@ -1,4 +1,4 @@
-use std::borrow::Cow;
+use std::borrow::{Borrow, Cow};
 use std::cell::RefCell;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
@@ -410,6 +410,16 @@ struct FdIdentifier {
     ino: u64,
 }
 
+impl<T: Borrow<File>> From<T> for FdIdentifier {
+    fn from(file: T) -> Self {
+        let file_metadata = file.borrow().metadata().expect("Failed to get metadata for file.");
+        FdIdentifier {
+            dev: file_metadata.dev(),
+            ino: file_metadata.ino(),
+        }
+    }
+}
+
 /// Handles a selection event by trying to copy the selection data
 /// and setting a new selection which reads the data from our own program.
 /// If this event was triggered by ourselves, we do not set a new selection.
@@ -460,13 +470,7 @@ fn handle_selection_event(
             // Save file descriptor identifier of the writable end of the pipe,
             // so we can check if we are writing to our own pipe.
             let write_file = unsafe { std::fs::File::from_raw_fd(write.into_raw_fd()) };
-            let write_file_metadata = write_file
-                .metadata()
-                .expect("Failed to get metadata of the writable end of the pipe");
-            let fd_identifier = FdIdentifier {
-                dev: write_file_metadata.dev(),
-                ino: write_file_metadata.ino(),
-            };
+            let fd_identifier = FdIdentifier::from(&write_file);
             fd_from_own_app_mut.insert(fd_identifier, false);
 
             // We want to receive the data for this mime type
@@ -554,13 +558,7 @@ fn handle_selection_event(
 
                 // Check if the file descriptor comes from our own app
                 let fd_file = unsafe { File::from_raw_fd(fd) };
-                let fd_file_metadata = fd_file
-                    .metadata()
-                    .expect("Failed to get metadata of the data source pipe");
-                let fd_identifier = FdIdentifier {
-                    dev: fd_file_metadata.dev(),
-                    ino: fd_file_metadata.ino(),
-                };
+                let fd_identifier = FdIdentifier::from(&fd_file);
 
                 if let Some(is_from_own_app) = fd_from_own_app2.deref().borrow_mut().get_mut(&fd_identifier) {
                     // File descriptor is from our own app, so we update the information
@@ -724,58 +722,58 @@ fn read_with_timeout(
             1.. => {
                 // Readability might have changed, checking...
                 remaining_pfds.retain_mut(|pfd| {
-                    if pfd.revents != 0 {
-                        // This file descriptor might have become readable.
-                        match remaining_fd_to_data.entry(pfd.fd) {
-                            Entry::Occupied(mut entry) => {
-                                let FdData { file, data, .. } = entry.get_mut();
+                    if pfd.revents == 0 {
+                        // Keep this pfd, since we still have not read everything.
+                        return true;
+                    }
 
-                                // Therefore read some data from the file descriptor.
-                                'read: loop {
-                                    match file.read(&mut buf) {
-                                        Ok(size) if size == 0 => {
-                                            // We reached the EOF of the reader.
-                                            // Remove entry from data map and insert data to result.
-                                            let removed_entry = entry.remove_entry();
-                                            let owned_mime_type = removed_entry.1.mime_type;
-                                            let data = removed_entry.1.data.into_boxed_slice();
-                                            mime_type_to_data.insert(owned_mime_type, Ok(data));
-                                            // Also remove this pfd from the remaining pfds.
-                                            return false;
-                                        }
-                                        Ok(size) => {
-                                            // Got some new data to read.
-                                            data.extend_from_slice(&buf[..size]);
-                                            break 'read;
-                                        }
-                                        Err(err) if err.kind() == ErrorKind::Interrupted => {
-                                            // Got interrupted, therefore retry read.
-                                            continue 'read;
-                                        }
-                                        Err(err) => {
-                                            // Some error occurred.
-                                            // Remove entry from data map and insert error to result.
-                                            let removed_entry = entry.remove_entry();
-                                            let owned_mime_type = removed_entry.1.mime_type;
-                                            mime_type_to_data.insert(
-                                                owned_mime_type,
-                                                Err(format!(
-                                                    "Error while reading from file descriptor: {}",
-                                                    err
-                                                ).into()),
-                                            );
-                                            // Also remove this pfd from the remaining pfds.
-                                            return false;
-                                        }
+                    // This file descriptor might have become readable.
+                    match remaining_fd_to_data.entry(pfd.fd) {
+                        Entry::Occupied(mut entry) => {
+                            let FdData { file, data, .. } = entry.get_mut();
+
+                            // Therefore read some data from the file descriptor.
+                            'read: loop {
+                                match file.read(&mut buf) {
+                                    Ok(size) if size == 0 => {
+                                        // We reached the EOF of the reader.
+                                        // Remove entry from data map and insert data to result.
+                                        let removed_entry = entry.remove_entry();
+                                        let owned_mime_type = removed_entry.1.mime_type;
+                                        let data = removed_entry.1.data.into_boxed_slice();
+                                        mime_type_to_data.insert(owned_mime_type, Ok(data));
+                                        // Also remove this pfd from the remaining pfds.
+                                        return false;
+                                    }
+                                    Ok(size) => {
+                                        // Got some new data to read.
+                                        data.extend_from_slice(&buf[..size]);
+                                        break 'read;
+                                    }
+                                    Err(err) if err.kind() == ErrorKind::Interrupted => {
+                                        // Got interrupted, therefore retry read.
+                                        continue 'read;
+                                    }
+                                    Err(err) => {
+                                        // Some error occurred.
+                                        // Remove entry from data map and insert error to result.
+                                        let removed_entry = entry.remove_entry();
+                                        let owned_mime_type = removed_entry.1.mime_type;
+                                        mime_type_to_data.insert(
+                                            owned_mime_type,
+                                            Err(format!("Error while reading from file descriptor: {}", err).into()),
+                                        );
+                                        // Also remove this pfd from the remaining pfds.
+                                        return false;
                                     }
                                 }
                             }
-                            Entry::Vacant(_) => unreachable!(),
                         }
-
-                        // Make the pollfd re-usable for the next poll call
-                        pfd.revents = 0;
+                        Entry::Vacant(_) => unreachable!(),
                     }
+
+                    // Make the pollfd re-usable for the next poll call
+                    pfd.revents = 0;
 
                     // Keep this pfd, since we still have not read everything.
                     true
