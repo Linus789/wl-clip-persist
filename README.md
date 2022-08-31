@@ -25,6 +25,9 @@ RUST_LOG=trace wl-clip-persist --clipboard regular
 ## Build from source
 * Install `rustup` to get the `rust` compiler installed on your system. [Install rustup](https://www.rust-lang.org/en-US/install.html)
 * Rust version 1.61.0 or later is required
+* Install dependencies:
+  - wayland
+  - wayland-protocols (compile-time dependency)
 * Build in release mode: `cargo build --release`
 * The resulting executable can be found at `target/release/wl-clip-persist`
 
