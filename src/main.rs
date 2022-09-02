@@ -363,6 +363,8 @@ fn handle_offer_events(
     seats: &Rc<RefCell<HashMap<u32, Main<WlSeat>>>>,
     clipboard_manager: &Main<ZwlrDataControlManagerV1>,
 ) {
+    let mut got_new_pipes = false;
+
     // First, create some pipes we can read from.
     seats.deref().borrow().values().for_each(|seat| {
         let data_device = get_data_device(seat.as_ref()).borrow();
@@ -383,11 +385,23 @@ fn handle_offer_events(
                     &selection.fd_from_own_app,
                     is_primary_clipboard,
                 );
+
                 offer.destroy();
+
+                if result.is_some() {
+                    got_new_pipes = true;
+                }
+
                 result
             });
         }
     });
+
+    if !got_new_pipes {
+        // In case we have not gotten any new pipes to read,
+        // we can just return because there is nothing more to do.
+        return;
+    }
 
     // Others programs need to know we want to read some data from the pipes,
     // so we can actually get the clipboard data.
