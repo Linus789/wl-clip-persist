@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use clap::builder::NonEmptyStringValueParser;
 use clap::{arg, crate_description, crate_name, crate_version, value_parser, Command, ValueEnum};
+use fancy_regex::Regex;
 use filedescriptor::{FileDescriptor, Pipe};
 use wayland_client::protocol::wl_display::WlDisplay;
 use wayland_client::protocol::wl_seat::WlSeat;
@@ -78,15 +79,41 @@ fn main() {
             .value_parser(clap::value_parser!(u64).range(1..=i32::MAX as u64))
             .default_value("3000"),
         )
+        .arg(
+            arg!(
+                -f --"all-mime-type-regex" <REGEX> "Only handle selection events where all offered MIME types have a match for the regex"
+            )
+            .required(false)
+            .value_parser(NonEmptyStringValueParser::new()),
+        )
         .get_matches();
 
     let clipboard_type = *matches.get_one::<ClipboardType>("clipboard").unwrap();
     let display_name: Option<OsString> = matches.get_one::<String>("display").map(|s| s.into());
     let read_timeout: Duration = Duration::from_millis(*matches.get_one::<u64>("read-timeout").unwrap());
     let write_timeout: Duration = Duration::from_millis(*matches.get_one::<u64>("write-timeout").unwrap());
+    let mime_type_regex: Option<Regex> = matches
+        .get_one::<String>("mime-type-regex")
+        .map(|s| match Regex::new(s) {
+            Ok(regex) => regex,
+            Err(err) => {
+                log::error!(
+                    target: log_default_target(),
+                    "Failed to parse the mime type regex. Error: {}",
+                    err
+                );
+                std::process::exit(1);
+            }
+        });
 
     // Run main program
-    handle_clipboard(clipboard_type, display_name, read_timeout, write_timeout);
+    handle_clipboard(
+        clipboard_type,
+        display_name,
+        read_timeout,
+        write_timeout,
+        mime_type_regex,
+    );
 }
 
 /// Holds data for the primary and regular selection.
@@ -181,7 +208,7 @@ fn init_global_manager_with_seats(
                 if interface == SEAT_INTERFACE_NAME {
                     // Remove seat from list
                     if seats2.deref().borrow_mut().remove(&id).is_some() {
-                        log::trace!(target: &seat_target(id), "Removed seat");
+                        log::trace!(target: &log_seat_target(id), "Removed seat");
                     }
                 }
             }
@@ -280,7 +307,7 @@ fn init_seat(seat: &Main<WlSeat>, clipboard_manager: &Main<ZwlrDataControlManage
 
     // Put data device in the user data of its seat
     seat.as_ref().user_data().set(move || data_device);
-    log::trace!(target: &seat_target(seat.as_ref().id()), "Initialized seat");
+    log::trace!(target: &log_seat_target(seat.as_ref().id()), "Initialized seat");
 }
 
 /// Makes the selections for the given clipboard persistent.
@@ -289,6 +316,7 @@ fn handle_clipboard(
     display_name: Option<OsString>,
     read_timeout: Duration,
     write_timeout: Duration,
+    mime_type_regex: Option<Regex>,
 ) {
     // Tries to connect to a wayland server socket by either the given name
     // or if none given by using the environment variables
@@ -297,6 +325,7 @@ fn handle_clipboard(
             Ok(display) => display,
             Err(err) => {
                 log::error!(
+                    target: log_default_target(),
                     "Failed to connect to a wayland server socket with the given name. Error: {}",
                     err
                 );
@@ -307,6 +336,7 @@ fn handle_clipboard(
             Ok(display) => display,
             Err(err) => {
                 log::error!(
+                    target: log_default_target(),
                     "Failed to connect to a wayland server socket using the contents of the environment variables. Error: {}",
                     err
                 );
@@ -338,14 +368,14 @@ fn handle_clipboard(
                 if clipboard_type.primary() {
                     default += "\nPerhaps the primary clipboard is not supported by your compositor?";
                 }
-                log::error!("{}\nError: {}", default, err);
+                log::error!(target: log_default_target(), "{}\nError: {}", default, err);
                 std::process::exit(1);
             }
         };
 
     // If there are currently no seats, stop
     if seats.deref().borrow().is_empty() {
-        log::error!("No seats found. Stopping program...");
+        log::error!(target: log_default_target(), "No seats found. Stopping program...");
         std::process::exit(1);
     }
 
@@ -374,6 +404,7 @@ fn handle_clipboard(
             clipboard_manager_instance,
             read_timeout,
             write_timeout,
+            mime_type_regex.as_ref(),
         );
     }
 }
@@ -388,6 +419,7 @@ fn handle_offer_events(
     clipboard_manager: &Main<ZwlrDataControlManagerV1>,
     read_timeout: Duration,
     write_timeout: Duration,
+    mime_type_regex: Option<&Regex>,
 ) {
     let mut got_new_pipes = false;
 
@@ -409,6 +441,7 @@ fn handle_offer_events(
                     seat_id,
                     &offer,
                     &selection.fd_from_own_app,
+                    mime_type_regex,
                     is_primary_clipboard,
                 );
 
@@ -432,7 +465,7 @@ fn handle_offer_events(
     // Others programs need to know we want to read some data from the pipes,
     // so we can actually get the clipboard data.
     if let Err(err) = EventQueueMethod::SyncRoundtrip.run(event_queue, display) {
-        log::error!("{}", err);
+        log::error!(target: log_default_target(), "{}", err);
         return;
     }
 
@@ -460,7 +493,7 @@ fn handle_offer_events(
                 // We got a new selection offer during the synchronous roundtrip.
                 // So do not overwrite the current selection with old data.
                 log::trace!(
-                    target: &seat_target(seat_id),
+                    target: &log_seat_target(seat_id),
                     "{} clipboard got a new selection event, so ignore the old one",
                     get_clipboard_type_str(is_primary_clipboard, true)
                 );
@@ -473,7 +506,7 @@ fn handle_offer_events(
 
             if is_from_own_app {
                 log::trace!(
-                    target: &seat_target(seat_id),
+                    target: &log_seat_target(seat_id),
                     "{} clipboard selection event was triggered by ourselves, so ignore it",
                     get_clipboard_type_str(is_primary_clipboard, true)
                 );
@@ -532,10 +565,11 @@ fn get_mime_types_with_pipes_from_offer(
     seat_id: u32,
     offer_event: &ZwlrDataControlOfferV1,
     fd_from_own_app: &Rc<RefCell<HashMap<FdIdentifier, bool>>>,
+    mime_type_regex: Option<&Regex>,
     is_primary_clipboard: bool,
 ) -> Option<Vec<(String, FileDescriptor)>> {
     log::trace!(
-        target: &seat_target(seat_id),
+        target: &log_seat_target(seat_id),
         "Handle new {} clipboard selection event",
         get_clipboard_type_str(is_primary_clipboard, false)
     );
@@ -546,6 +580,48 @@ fn get_mime_types_with_pipes_from_offer(
     if mime_types.is_empty() {
         // Offer has no mime types, so ignore it
         return None;
+    }
+
+    // Log all available mime types.
+    for mime_type in &mime_types {
+        log::trace!(
+            target: &log_seat_target(seat_id),
+            "Current selection event offers mime type: {}",
+            mime_type,
+        );
+    }
+
+    if let Some(regex) = mime_type_regex {
+        // Only keep this offer, if all mime types have
+        // a match for this regex.
+        let match_all_regex = mime_types.iter().all(|mime_type| {
+            match regex.is_match(mime_type) {
+                Ok(has_match) => {
+                    if !has_match {
+                        log::trace!(
+                            target: &log_seat_target(seat_id),
+                            "Ignoring selection event because this mime type does not have a match for the regex: {}",
+                            mime_type,
+                        );
+                    }
+                    has_match
+                }
+                Err(err) => {
+                    log::trace!(
+                        target: &log_seat_target(seat_id),
+                        "Checking regex returned an error: {}\nThis mime type has been checked: {}",
+                        err,
+                        mime_type,
+                    );
+                    // Just assume that the mime type has a match.
+                    true
+                }
+            }
+        });
+
+        if !match_all_regex {
+            return None;
+        }
     }
 
     // The file descriptors from the last offer are invalid.
@@ -599,7 +675,7 @@ fn read_pipes_to_mime_types_with_data(
             Ok(data) => Some((mime_type, data)),
             Err(err) => {
                 log::warn!(
-                    target: &seat_target(seat_id),
+                    target: &log_seat_target(seat_id),
                     "{}\nIgnoring mime type: {}",
                     err,
                     mime_type
@@ -639,7 +715,7 @@ fn create_data_source(
             // Send the data as the specified mime type over the passed file descriptor, then close it.
             SourceEvent::Send { mime_type, fd } => {
                 log::trace!(
-                    target: &seat_target(seat_id),
+                    target: &log_seat_target(seat_id),
                     "{} clipboard data source {} received new request for mime type: {}",
                     clipboard_type_str_title,
                     data_source.as_ref().id(),
@@ -677,7 +753,7 @@ fn create_data_source(
 
                     if let Err(err) = pipe_io::write_with_timeout(write, data, write_timout) {
                         log::warn!(
-                            target: &seat_target(seat_id),
+                            target: &log_seat_target(seat_id),
                             "{}\nFailed to send {} clipboard data for mime type: {}",
                             err,
                             clipboard_type_str_lower,
@@ -694,7 +770,7 @@ fn create_data_source(
                 // Destroy the current data source.
                 data_source.destroy();
                 log::trace!(
-                    target: &seat_target(seat_id),
+                    target: &log_seat_target(seat_id),
                     "Destroyed {} clipboard data source {}",
                     clipboard_type_str_lower,
                     data_source_id
@@ -721,7 +797,7 @@ fn update_selection(
     }
 
     log::trace!(
-        target: &seat_target(seat_id),
+        target: &log_seat_target(seat_id),
         "Created {} clipboard data source {}",
         get_clipboard_type_str(is_primary_clipboard, false),
         data_source.as_ref().id(),
@@ -789,7 +865,12 @@ impl EventQueueMethod {
 }
 
 /// Returns a formatted target for logging purposes.
-fn seat_target(seat_id: u32) -> String {
+fn log_default_target() -> &'static str {
+    crate_name!()
+}
+
+/// Returns a formatted target for logging purposes.
+fn log_seat_target(seat_id: u32) -> String {
     format!("{} Seat {}", crate_name!(), seat_id)
 }
 

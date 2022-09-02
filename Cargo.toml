@@ -15,5 +15,6 @@ env_logger = "0.9.0"
 clap = { version = "3.2.8", features = ["cargo", "derive"] }
 filedescriptor = "0.8.2"
 libc = "0.2.126"
+fancy-regex = "0.10.0"
 wayland-protocols = { version = "0.29.4", features = ["client", "unstable_protocols"] }
 wayland-client = { version = "0.29.4", features = ["use_system_lib"] }
