@@ -31,12 +31,6 @@ use wayland_protocols::wlr::unstable::data_control::v1::client::zwlr_data_contro
     Event as SourceEvent, ZwlrDataControlSourceV1,
 };
 
-/// Timeout for trying to get the current clipboard.
-const READ_TIMEOUT: Duration = Duration::from_millis(500);
-
-// Timeout for trying to send the current clipboard to other programs.
-const WRITE_TIMEOUT: Duration = Duration::from_millis(3000);
-
 fn main() {
     // Initialize logger
     env_logger::builder()
@@ -68,13 +62,31 @@ fn main() {
             .required(false)
             .value_parser(NonEmptyStringValueParser::new()),
         )
+        .arg(
+            arg!(
+                -r --"read-timeout" <MILLISECONDS> "Timeout for trying to get the current clipboard"
+            )
+            .required(false)
+            .value_parser(clap::value_parser!(u64).range(1..=i32::MAX as u64))
+            .default_value("500"),
+        )
+        .arg(
+            arg!(
+                -w --"write-timeout" <MILLISECONDS> "Timeout for trying to send the current clipboard to other programs"
+            )
+            .required(false)
+            .value_parser(clap::value_parser!(u64).range(1..=i32::MAX as u64))
+            .default_value("3000"),
+        )
         .get_matches();
 
     let clipboard_type = *matches.get_one::<ClipboardType>("clipboard").unwrap();
     let display_name: Option<OsString> = matches.get_one::<String>("display").map(|s| s.into());
+    let read_timeout: Duration = Duration::from_millis(*matches.get_one::<u64>("read-timeout").unwrap());
+    let write_timeout: Duration = Duration::from_millis(*matches.get_one::<u64>("write-timeout").unwrap());
 
     // Run main program
-    handle_clipboard(clipboard_type, display_name);
+    handle_clipboard(clipboard_type, display_name, read_timeout, write_timeout);
 }
 
 /// Holds data for the primary and regular selection.
@@ -272,7 +284,12 @@ fn init_seat(seat: &Main<WlSeat>, clipboard_manager: &Main<ZwlrDataControlManage
 }
 
 /// Makes the selections for the given clipboard persistent.
-fn handle_clipboard(clipboard_type: ClipboardType, display_name: Option<OsString>) {
+fn handle_clipboard(
+    clipboard_type: ClipboardType,
+    display_name: Option<OsString>,
+    read_timeout: Duration,
+    write_timeout: Duration,
+) {
     // Tries to connect to a wayland server socket by either the given name
     // or if none given by using the environment variables
     let display = match display_name {
@@ -350,7 +367,14 @@ fn handle_clipboard(clipboard_type: ClipboardType, display_name: Option<OsString
             .unwrap_or_else(|err| panic!("{}", err));
 
         // Handle selection offers
-        handle_offer_events(&display, &mut event_queue, &seats, clipboard_manager_instance);
+        handle_offer_events(
+            &display,
+            &mut event_queue,
+            &seats,
+            clipboard_manager_instance,
+            read_timeout,
+            write_timeout,
+        );
     }
 }
 
@@ -362,6 +386,8 @@ fn handle_offer_events(
     event_queue: &mut EventQueue,
     seats: &Rc<RefCell<HashMap<u32, Main<WlSeat>>>>,
     clipboard_manager: &Main<ZwlrDataControlManagerV1>,
+    read_timeout: Duration,
+    write_timeout: Duration,
 ) {
     let mut got_new_pipes = false;
 
@@ -455,7 +481,7 @@ fn handle_offer_events(
             }
 
             // Read pipes to data.
-            let data = read_pipes_to_mime_types_with_data(seat_id, pipes);
+            let data = read_pipes_to_mime_types_with_data(seat_id, pipes, read_timeout);
 
             if data.is_empty() {
                 // If we failed to get the data for at least one mime type,
@@ -469,6 +495,7 @@ fn handle_offer_events(
                 data,
                 clipboard_manager,
                 &selection.fd_from_own_app,
+                write_timeout,
                 is_primary_clipboard,
             );
 
@@ -564,8 +591,9 @@ fn is_offer_event_from_own_app(fd_from_own_app: &Rc<RefCell<HashMap<FdIdentifier
 fn read_pipes_to_mime_types_with_data(
     seat_id: u32,
     mime_types_with_pipes: Vec<(String, FileDescriptor)>,
+    read_timeout: Duration,
 ) -> HashMap<String, Box<[u8]>> {
-    pipe_io::read_with_timeout(mime_types_with_pipes, READ_TIMEOUT)
+    pipe_io::read_with_timeout(mime_types_with_pipes, read_timeout)
         .into_iter()
         .filter_map(|(mime_type, data)| match data {
             Ok(data) => Some((mime_type, data)),
@@ -588,6 +616,7 @@ fn create_data_source(
     mime_types_to_data: HashMap<String, Box<[u8]>>,
     clipboard_manager: &Main<ZwlrDataControlManagerV1>,
     fd_from_own_app: &Rc<RefCell<HashMap<FdIdentifier, bool>>>,
+    write_timout: Duration,
     is_primary_clipboard: bool,
 ) -> Main<ZwlrDataControlSourceV1> {
     let clipboard_type_str_title = get_clipboard_type_str(is_primary_clipboard, true);
@@ -646,7 +675,7 @@ fn create_data_source(
                     let data = mime_types_to_data2.get(&mime_type).unwrap();
                     let write = unsafe { FileDescriptor::from_raw_fd(fd) };
 
-                    if let Err(err) = pipe_io::write_with_timeout(write, data, WRITE_TIMEOUT) {
+                    if let Err(err) = pipe_io::write_with_timeout(write, data, write_timout) {
                         log::warn!(
                             target: &seat_target(seat_id),
                             "{}\nFailed to send {} clipboard data for mime type: {}",
