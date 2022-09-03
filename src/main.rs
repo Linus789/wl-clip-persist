@@ -92,28 +92,38 @@ fn main() {
     let display_name: Option<OsString> = matches.get_one::<String>("display").map(|s| s.into());
     let read_timeout: Duration = Duration::from_millis(*matches.get_one::<u64>("read-timeout").unwrap());
     let write_timeout: Duration = Duration::from_millis(*matches.get_one::<u64>("write-timeout").unwrap());
-    let mime_type_regex: Option<Regex> = matches
-        .get_one::<String>("mime-type-regex")
-        .map(|s| match Regex::new(s) {
-            Ok(regex) => regex,
-            Err(err) => {
-                log::error!(
-                    target: log_default_target(),
-                    "Failed to parse the mime type regex. Error: {}",
-                    err
-                );
-                std::process::exit(1);
-            }
-        });
+    let all_mime_type_regex: Option<Regex> =
+        matches
+            .get_one::<String>("mime-type-regex")
+            .map(|s| match Regex::new(s) {
+                Ok(regex) => regex,
+                Err(err) => {
+                    log::error!(
+                        target: log_default_target(),
+                        "Failed to parse the mime type regex. Error: {}",
+                        err
+                    );
+                    std::process::exit(1);
+                }
+            });
 
     // Run main program
-    handle_clipboard(
+    handle_clipboard(Settings {
         clipboard_type,
         display_name,
         read_timeout,
         write_timeout,
-        mime_type_regex,
-    );
+        all_mime_type_regex,
+    });
+}
+
+/// The settings that have been specified via arguments.
+struct Settings {
+    clipboard_type: ClipboardType,
+    display_name: Option<OsString>,
+    read_timeout: Duration,
+    write_timeout: Duration,
+    all_mime_type_regex: Option<Regex>,
 }
 
 /// Holds data for the primary and regular selection.
@@ -311,16 +321,10 @@ fn init_seat(seat: &Main<WlSeat>, clipboard_manager: &Main<ZwlrDataControlManage
 }
 
 /// Makes the selections for the given clipboard persistent.
-fn handle_clipboard(
-    clipboard_type: ClipboardType,
-    display_name: Option<OsString>,
-    read_timeout: Duration,
-    write_timeout: Duration,
-    mime_type_regex: Option<Regex>,
-) {
+fn handle_clipboard(settings: Settings) {
     // Tries to connect to a wayland server socket by either the given name
     // or if none given by using the environment variables
-    let display = match display_name {
+    let display = match settings.display_name {
         Some(name) => match Display::connect_to_name(name) {
             Ok(display) => display,
             Err(err) => {
@@ -347,7 +351,8 @@ fn handle_clipboard(
     let mut event_queue = display.create_event_queue();
     let wl_display = display.attach(event_queue.token());
     let clipboard_manager: Rc<RefCell<Option<Main<ZwlrDataControlManagerV1>>>> = Rc::new(RefCell::new(None));
-    let (global_manager, seats) = init_global_manager_with_seats(&wl_display, &clipboard_manager, clipboard_type);
+    let (global_manager, seats) =
+        init_global_manager_with_seats(&wl_display, &clipboard_manager, settings.clipboard_type);
 
     // Retrieve the global interfaces, otherwise it is not possible to create a clipboard manager instance
     EventQueueMethod::SyncRoundtrip
@@ -355,7 +360,7 @@ fn handle_clipboard(
         .unwrap_or_else(|err| panic!("{}", err));
 
     // Tries to create a clipboard manager instance
-    let clipboard_manager_version = if clipboard_type.primary() { 2 } else { 1 };
+    let clipboard_manager_version = if settings.clipboard_type.primary() { 2 } else { 1 };
     let clipboard_manager_instance =
         match global_manager.instantiate_exact::<ZwlrDataControlManagerV1>(clipboard_manager_version) {
             Ok(instance) => instance,
@@ -365,7 +370,7 @@ fn handle_clipboard(
                     ZwlrDataControlManagerV1::NAME,
                     clipboard_manager_version
                 );
-                if clipboard_type.primary() {
+                if settings.clipboard_type.primary() {
                     default += "\nPerhaps the primary clipboard is not supported by your compositor?";
                 }
                 log::error!(target: log_default_target(), "{}\nError: {}", default, err);
@@ -381,7 +386,7 @@ fn handle_clipboard(
 
     // Initialize each currently available seat
     for seat in seats.deref().borrow().values() {
-        init_seat(seat, &clipboard_manager_instance, clipboard_type);
+        init_seat(seat, &clipboard_manager_instance, settings.clipboard_type);
     }
 
     // Make the clipboard manager instance available to the global manager handler,
@@ -402,9 +407,9 @@ fn handle_clipboard(
             &mut event_queue,
             &seats,
             clipboard_manager_instance,
-            read_timeout,
-            write_timeout,
-            mime_type_regex.as_ref(),
+            settings.read_timeout,
+            settings.write_timeout,
+            settings.all_mime_type_regex.as_ref(),
         );
     }
 }
@@ -419,7 +424,7 @@ fn handle_offer_events(
     clipboard_manager: &Main<ZwlrDataControlManagerV1>,
     read_timeout: Duration,
     write_timeout: Duration,
-    mime_type_regex: Option<&Regex>,
+    all_mime_type_regex: Option<&Regex>,
 ) {
     let mut got_new_pipes = false;
 
@@ -441,7 +446,7 @@ fn handle_offer_events(
                     seat_id,
                     &offer,
                     &selection.fd_from_own_app,
-                    mime_type_regex,
+                    all_mime_type_regex,
                     is_primary_clipboard,
                 );
 
@@ -565,7 +570,7 @@ fn get_mime_types_with_pipes_from_offer(
     seat_id: u32,
     offer_event: &ZwlrDataControlOfferV1,
     fd_from_own_app: &Rc<RefCell<HashMap<FdIdentifier, bool>>>,
-    mime_type_regex: Option<&Regex>,
+    all_mime_type_regex: Option<&Regex>,
     is_primary_clipboard: bool,
 ) -> Option<Vec<(String, FileDescriptor)>> {
     log::trace!(
@@ -591,7 +596,7 @@ fn get_mime_types_with_pipes_from_offer(
         );
     }
 
-    if let Some(regex) = mime_type_regex {
+    if let Some(regex) = all_mime_type_regex {
         // Only keep this offer, if all mime types have
         // a match for this regex.
         let match_all_regex = mime_types.iter().all(|mime_type| {
