@@ -28,6 +28,7 @@ RUST_LOG=trace wl-clip-persist --clipboard regular
 * Install dependencies:
   - wayland
   - wayland-protocols (compile-time dependency)
+  - pkg-config (compile-time dependency)
 * Build in release mode: `cargo build --release`
 * The resulting executable can be found at `target/release/wl-clip-persist`
 
