@@ -25,6 +25,7 @@ Regular and Primary clipboard
 wl-clip-persist --clipboard both
 ```
 
+## Optional arguments
 ### Wayland Display
 The wayland display is usually derived from the environment variables (`WAYLAND_DISPLAY`), but it can also be set explicitly.
 ```
