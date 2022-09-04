@@ -33,6 +33,9 @@ wl-clip-persist --clipboard regular --display wayland-1
 ```
 
 ### Timeout
+*Default read timeout: 500ms*<br>
+*Default write timeout: 3000ms*
+
 It is possible to change the read and write timeouts.
 In this example, the read timeout is reduced to 50ms and the write timeout to 100ms.
 ```
@@ -43,6 +46,8 @@ Currently, whenever we read the clipboard data it blocks our main thread. That m
 When we write clipboard data (i.e. send the clipboard data to another program), though, we do that in a background thread.
 
 ### Filter
+*Default: no filter*
+
 With `--all-mime-type-regex <REGEX>` only selection events where all offered MIME types have a match for the regex are handled.
 You might want to use this option to ignore selection events that offer for example images. If the event is ignored, you will still be able to paste the images, but only for as long as the program you copied them from is open.
 
