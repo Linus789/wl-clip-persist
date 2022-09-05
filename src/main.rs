@@ -81,6 +81,13 @@ fn main() {
         )
         .arg(
             arg!(
+                -l --"selection-size-limit" <BYTES> "Only handle selection events whose total data size does not exceed the size limit"
+            )
+            .required(false)
+            .value_parser(clap::value_parser!(u64).range(1..)),
+        )
+        .arg(
+            arg!(
                 -f --"all-mime-type-regex" <REGEX> "Only handle selection events where all offered MIME types have a match for the regex"
             )
             .required(false)
@@ -92,6 +99,10 @@ fn main() {
     let display_name: Option<OsString> = matches.get_one::<String>("display").map(|s| s.into());
     let read_timeout: Duration = Duration::from_millis(*matches.get_one::<u64>("read-timeout").unwrap());
     let write_timeout: Duration = Duration::from_millis(*matches.get_one::<u64>("write-timeout").unwrap());
+    let selection_size_limit_bytes: u64 = matches
+        .get_one::<u64>("selection-size-limit")
+        .copied()
+        .unwrap_or(u64::MAX);
     let all_mime_type_regex: Option<Regex> =
         matches
             .get_one::<String>("mime-type-regex")
@@ -113,6 +124,7 @@ fn main() {
         display_name,
         read_timeout,
         write_timeout,
+        selection_size_limit_bytes,
         all_mime_type_regex,
     });
 }
@@ -123,6 +135,7 @@ struct Settings {
     display_name: Option<OsString>,
     read_timeout: Duration,
     write_timeout: Duration,
+    selection_size_limit_bytes: u64,
     all_mime_type_regex: Option<Regex>,
 }
 
@@ -145,13 +158,32 @@ impl SelectionsData {
 struct SingleSelectionData {
     /// Currently available selection offer, if any.
     offer: Option<ZwlrDataControlOfferV1>,
-    /// If available, a list of tuples containing a mime type and a file descriptor.
-    pipes: Option<Vec<(String, FileDescriptor)>>,
+    /// If available, mime types associated with pipes you can read the data from.
+    pipes: Option<OfferPipeData>,
     /// A map that keeps track of file descriptors that are the writable end of the pipe.
     /// The boolean value expresses whether the file descriptor arrived at our
     /// own program to send some text to it. This way we can identify selection offer events
     /// that got triggered by ourselves.
     fd_from_own_app: Rc<RefCell<HashMap<FdIdentifier, bool>>>,
+}
+
+// The offer data hold the available mime types,
+// the total size of the mime types text
+// and whether it already exceeded the size limit.
+struct OfferData {
+    mime_types: HashSet<Box<str>>,
+    mime_types_size_bytes: u64,
+    exceeded_size_limit: bool,
+}
+
+impl Default for OfferData {
+    fn default() -> Self {
+        OfferData {
+            mime_types: HashSet::with_capacity(32),
+            mime_types_size_bytes: 0,
+            exceeded_size_limit: false,
+        }
+    }
 }
 
 /// Get the clipboard data device for the given seat.
@@ -167,9 +199,9 @@ fn get_selections_data(data_device: &Proxy<ZwlrDataControlDeviceV1>) -> &RefCell
     data_device.user_data().get::<RefCell<SelectionsData>>().unwrap()
 }
 
-/// Get the available mime types for the given selection offer.
-fn get_available_mime_types(offer: &Proxy<ZwlrDataControlOfferV1>) -> &RefCell<HashSet<String>> {
-    offer.user_data().get::<RefCell<HashSet<String>>>().unwrap()
+/// Get the offer data for the given selection offer.
+fn get_offer_data(offer: &Proxy<ZwlrDataControlOfferV1>) -> &RefCell<OfferData> {
+    offer.user_data().get::<RefCell<OfferData>>().unwrap()
 }
 
 /// Create a GlobalManager that adds new seats to the list
@@ -179,6 +211,7 @@ fn init_global_manager_with_seats(
     display: &Attached<WlDisplay>,
     clipboard_manager: &Rc<RefCell<Option<Main<ZwlrDataControlManagerV1>>>>,
     clipboard_type: ClipboardType,
+    selection_size_limit_bytes: u64,
 ) -> (GlobalManager, Rc<RefCell<HashMap<u32, Main<WlSeat>>>>) {
     let seats = Rc::new(RefCell::new(HashMap::<u32, Main<WlSeat>>::new()));
     let seats2 = seats.clone();
@@ -190,7 +223,12 @@ fn init_global_manager_with_seats(
         let mut global_implementor = |seat: Main<WlSeat>, _: DispatchData| {
             if let Some(clipboard_manager_instance) = clipboard_manager2.deref().borrow().as_ref() {
                 // Seems to be a seat that got added later, so initialize it
-                init_seat(&seat, clipboard_manager_instance, clipboard_type);
+                init_seat(
+                    &seat,
+                    clipboard_manager_instance,
+                    clipboard_type,
+                    selection_size_limit_bytes,
+                );
             }
 
             // Add seat to list
@@ -229,7 +267,12 @@ fn init_global_manager_with_seats(
 
 /// Initializes a seat by assigning a handler for the selection offer events
 /// and creating all the necessary infrastructure around it.
-fn init_seat(seat: &Main<WlSeat>, clipboard_manager: &Main<ZwlrDataControlManagerV1>, clipboard_type: ClipboardType) {
+fn init_seat(
+    seat: &Main<WlSeat>,
+    clipboard_manager: &Main<ZwlrDataControlManagerV1>,
+    clipboard_type: ClipboardType,
+    selection_size_limit_bytes: u64,
+) {
     // Create a data device that can be used to manage a seat's selection.
     let data_device: Rc<RefCell<Option<Main<ZwlrDataControlDeviceV1>>>> =
         Rc::new(RefCell::new(Some(clipboard_manager.get_data_device(seat))));
@@ -250,16 +293,29 @@ fn init_seat(seat: &Main<WlSeat>, clipboard_manager: &Main<ZwlrDataControlManage
             // and is used to describe the mime type that are offered
             DeviceEvent::DataOffer { id } => {
                 // Create HashSet where all available mime types are saved
-                id.as_ref()
-                    .user_data()
-                    .set(move || RefCell::new(HashSet::<String>::with_capacity(32)));
+                id.as_ref().user_data().set(move || RefCell::new(OfferData::default()));
 
                 // Save mime type in that HashSet for each mime type we are notified about
-                id.quick_assign(|offer, event, _| {
+                id.quick_assign(move |offer, event, _| {
                     if let OfferEvent::Offer { mime_type } = event {
-                        get_available_mime_types(offer.as_ref()).borrow_mut().insert(mime_type);
+                        let mut offer_data = get_offer_data(offer.as_ref()).borrow_mut();
+
+                        if offer_data.exceeded_size_limit {
+                            // We already exceeded the limit, we can ignore the rest.
+                            return;
+                        }
+
+                        // Check size limit.
+                        offer_data.mime_types_size_bytes += mime_type.len() as u64;
+
+                        if offer_data.mime_types_size_bytes > selection_size_limit_bytes {
+                            offer_data.exceeded_size_limit = true;
+                            return;
+                        }
+
+                        offer_data.mime_types.insert(mime_type.into_boxed_str());
                     }
-                })
+                });
             }
             // Advertises a new primary selection
             DeviceEvent::PrimarySelection { id } => {
@@ -321,10 +377,10 @@ fn init_seat(seat: &Main<WlSeat>, clipboard_manager: &Main<ZwlrDataControlManage
 }
 
 /// Makes the selections for the given clipboard persistent.
-fn handle_clipboard(settings: Settings) {
+fn handle_clipboard(mut settings: Settings) {
     // Tries to connect to a wayland server socket by either the given name
     // or if none given by using the environment variables
-    let display = match settings.display_name {
+    let display = match settings.display_name.take() {
         Some(name) => match Display::connect_to_name(name) {
             Ok(display) => display,
             Err(err) => {
@@ -351,8 +407,12 @@ fn handle_clipboard(settings: Settings) {
     let mut event_queue = display.create_event_queue();
     let wl_display = display.attach(event_queue.token());
     let clipboard_manager: Rc<RefCell<Option<Main<ZwlrDataControlManagerV1>>>> = Rc::new(RefCell::new(None));
-    let (global_manager, seats) =
-        init_global_manager_with_seats(&wl_display, &clipboard_manager, settings.clipboard_type);
+    let (global_manager, seats) = init_global_manager_with_seats(
+        &wl_display,
+        &clipboard_manager,
+        settings.clipboard_type,
+        settings.selection_size_limit_bytes,
+    );
 
     // Retrieve the global interfaces, otherwise it is not possible to create a clipboard manager instance
     EventQueueMethod::SyncRoundtrip
@@ -386,7 +446,12 @@ fn handle_clipboard(settings: Settings) {
 
     // Initialize each currently available seat
     for seat in seats.deref().borrow().values() {
-        init_seat(seat, &clipboard_manager_instance, settings.clipboard_type);
+        init_seat(
+            seat,
+            &clipboard_manager_instance,
+            settings.clipboard_type,
+            settings.selection_size_limit_bytes,
+        );
     }
 
     // Make the clipboard manager instance available to the global manager handler,
@@ -407,9 +472,7 @@ fn handle_clipboard(settings: Settings) {
             &mut event_queue,
             &seats,
             clipboard_manager_instance,
-            settings.read_timeout,
-            settings.write_timeout,
-            settings.all_mime_type_regex.as_ref(),
+            &settings,
         );
     }
 }
@@ -422,9 +485,7 @@ fn handle_offer_events(
     event_queue: &mut EventQueue,
     seats: &Rc<RefCell<HashMap<u32, Main<WlSeat>>>>,
     clipboard_manager: &Main<ZwlrDataControlManagerV1>,
-    read_timeout: Duration,
-    write_timeout: Duration,
-    all_mime_type_regex: Option<&Regex>,
+    settings: &Settings,
 ) {
     let mut got_new_pipes = false;
 
@@ -446,7 +507,7 @@ fn handle_offer_events(
                     seat_id,
                     &offer,
                     &selection.fd_from_own_app,
-                    all_mime_type_regex,
+                    settings,
                     is_primary_clipboard,
                 );
 
@@ -488,8 +549,8 @@ fn handle_offer_events(
 
         for (selection, is_primary_clipboard) in selections_data.iter_mut() {
             // Check if there are pipes to read, otherwise skip.
-            let pipes = if let Some(pipes) = selection.pipes.take() {
-                pipes
+            let offer_pipe_data = if let Some(pipe_data) = selection.pipes.take() {
+                pipe_data
             } else {
                 continue;
             };
@@ -519,13 +580,23 @@ fn handle_offer_events(
             }
 
             // Read pipes to data.
-            let data = read_pipes_to_mime_types_with_data(seat_id, pipes, read_timeout);
-
-            if data.is_empty() {
-                // If we failed to get the data for at least one mime type,
-                // there is nothing for us to do, so skip.
-                continue;
-            }
+            let data = match read_pipes_to_mime_types_with_data(
+                seat_id,
+                offer_pipe_data.pipes,
+                settings,
+                offer_pipe_data.mime_types_size_bytes,
+            ) {
+                Some(data) if data.is_empty() => {
+                    // If we failed to get the data for at least one mime type,
+                    // there is nothing for us to do, so skip.
+                    continue;
+                }
+                Some(data) => data,
+                None => {
+                    // Some error occurred. There is nothing for us to do, so skip.
+                    continue;
+                }
+            };
 
             // Create data source from data.
             let data_source = create_data_source(
@@ -533,7 +604,7 @@ fn handle_offer_events(
                 data,
                 clipboard_manager,
                 &selection.fd_from_own_app,
-                write_timeout,
+                settings.write_timeout,
                 is_primary_clipboard,
             );
 
@@ -565,14 +636,22 @@ impl<T: Borrow<File>> From<T> for FdIdentifier {
     }
 }
 
-/// Returns a list of tuples containing a mime type and a pipe to read from.
+/// Offer parsed into pipes to read from.
+struct OfferPipeData {
+    /// A list of tuples containing a mime type and a pipe to read from.
+    pipes: Vec<(Box<str>, FileDescriptor)>,
+    /// The total size of the mime type texts.
+    mime_types_size_bytes: u64,
+}
+
+/// Returns mime types associated to pipes you can read the data from.
 fn get_mime_types_with_pipes_from_offer(
     seat_id: u32,
     offer_event: &ZwlrDataControlOfferV1,
     fd_from_own_app: &Rc<RefCell<HashMap<FdIdentifier, bool>>>,
-    all_mime_type_regex: Option<&Regex>,
+    settings: &Settings,
     is_primary_clipboard: bool,
-) -> Option<Vec<(String, FileDescriptor)>> {
+) -> Option<OfferPipeData> {
     log::trace!(
         target: &log_seat_target(seat_id),
         "Handle new {} clipboard selection event",
@@ -580,7 +659,18 @@ fn get_mime_types_with_pipes_from_offer(
     );
 
     // Get all available mime types for that offer
-    let mime_types = get_available_mime_types(offer_event.as_ref()).take();
+    let offer_data = get_offer_data(offer_event.as_ref()).replace(OfferData {
+        mime_types: HashSet::with_capacity(0),
+        mime_types_size_bytes: 0,
+        exceeded_size_limit: false,
+    });
+
+    // Check size limit.
+    if offer_data.exceeded_size_limit {
+        return None;
+    }
+
+    let mime_types = offer_data.mime_types;
 
     if mime_types.is_empty() {
         // Offer has no mime types, so ignore it
@@ -596,7 +686,7 @@ fn get_mime_types_with_pipes_from_offer(
         );
     }
 
-    if let Some(regex) = all_mime_type_regex {
+    if let Some(regex) = settings.all_mime_type_regex.as_ref() {
         // Only keep this offer, if all mime types have
         // a match for this regex.
         let match_all_regex = mime_types.iter().all(|mime_type| {
@@ -637,7 +727,7 @@ fn get_mime_types_with_pipes_from_offer(
     fd_from_own_app_mut.clear();
 
     // Create a pipe to read the data for each mime type
-    let mime_types_with_pipes: Vec<(String, FileDescriptor)> = mime_types
+    let mime_types_with_pipes: Vec<(Box<str>, FileDescriptor)> = mime_types
         .into_iter()
         .map(|mime_type| {
             let Pipe { read, write } = Pipe::new().expect("Failed to create pipe");
@@ -658,7 +748,10 @@ fn get_mime_types_with_pipes_from_offer(
         })
         .collect();
 
-    Some(mime_types_with_pipes)
+    Some(OfferPipeData {
+        pipes: mime_types_with_pipes,
+        mime_types_size_bytes: offer_data.mime_types_size_bytes,
+    })
 }
 
 /// Checks if the offer event was triggered by ourselves.
@@ -671,30 +764,45 @@ fn is_offer_event_from_own_app(fd_from_own_app: &Rc<RefCell<HashMap<FdIdentifier
 /// Read the data from the pipes and return it.
 fn read_pipes_to_mime_types_with_data(
     seat_id: u32,
-    mime_types_with_pipes: Vec<(String, FileDescriptor)>,
-    read_timeout: Duration,
-) -> HashMap<String, Box<[u8]>> {
-    pipe_io::read_with_timeout(mime_types_with_pipes, read_timeout)
-        .into_iter()
-        .filter_map(|(mime_type, data)| match data {
-            Ok(data) => Some((mime_type, data)),
-            Err(err) => {
-                log::warn!(
-                    target: &log_seat_target(seat_id),
-                    "{}\nIgnoring mime type: {}",
-                    err,
-                    mime_type
-                );
-                None
-            }
-        })
-        .collect()
+    mime_types_with_pipes: Vec<(Box<str>, FileDescriptor)>,
+    settings: &Settings,
+    mime_types_size_bytes: u64,
+) -> Option<HashMap<Box<str>, Box<[u8]>>> {
+    pipe_io::read_with_timeout(
+        mime_types_with_pipes,
+        settings.read_timeout,
+        settings.selection_size_limit_bytes,
+        mime_types_size_bytes,
+    )
+    .map_err(|err| {
+        log::warn!(
+            target: &log_seat_target(seat_id),
+            "{}\nIgnoring selection event...",
+            err
+        );
+    })
+    .ok()?
+    .into_iter()
+    .filter_map(|(mime_type, data)| match data {
+        Ok(data) => Some((mime_type, data)),
+        Err(err) => {
+            log::warn!(
+                target: &log_seat_target(seat_id),
+                "{}\nIgnoring mime type: {}",
+                err,
+                mime_type
+            );
+            None
+        }
+    })
+    .collect::<HashMap<_, _>>()
+    .into()
 }
 
 /// Creates a data source from the according clipboard contents.
 fn create_data_source(
     seat_id: u32,
-    mime_types_to_data: HashMap<String, Box<[u8]>>,
+    mime_types_to_data: HashMap<Box<str>, Box<[u8]>>,
     clipboard_manager: &Main<ZwlrDataControlManagerV1>,
     fd_from_own_app: &Rc<RefCell<HashMap<FdIdentifier, bool>>>,
     write_timout: Duration,
@@ -708,7 +816,7 @@ fn create_data_source(
 
     // These are the mime types we offer
     for mime_type in mime_types_to_data.keys() {
-        data_source.offer(mime_type.clone());
+        data_source.offer(mime_type.to_string());
     }
 
     let mime_types_to_data = Arc::new(mime_types_to_data);
@@ -741,7 +849,9 @@ fn create_data_source(
                     return;
                 }
 
-                if !mime_types_to_data.contains_key(&mime_type) {
+                let mime_type_boxed = mime_type.into_boxed_str();
+
+                if !mime_types_to_data.contains_key(&mime_type_boxed) {
                     // Mime type not available, so return
                     drop(fd_file); // Explicitly close file descriptor
                     return;
@@ -753,7 +863,7 @@ fn create_data_source(
                 let mime_types_to_data2 = mime_types_to_data.clone();
 
                 std::thread::spawn(move || {
-                    let data = mime_types_to_data2.get(&mime_type).unwrap();
+                    let data = mime_types_to_data2.get(&mime_type_boxed).unwrap();
                     let write = unsafe { FileDescriptor::from_raw_fd(fd) };
 
                     if let Err(err) = pipe_io::write_with_timeout(write, data, write_timout) {
@@ -762,7 +872,7 @@ fn create_data_source(
                             "{}\nFailed to send {} clipboard data for mime type: {}",
                             err,
                             clipboard_type_str_lower,
-                            mime_type
+                            mime_type_boxed
                         );
                     }
                 });
