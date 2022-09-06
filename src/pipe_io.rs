@@ -12,12 +12,13 @@ use filedescriptor::FileDescriptor;
 pub(crate) fn read_with_timeout(
     mime_types_with_files: Vec<(Box<str>, FileDescriptor)>,
     timeout: Duration,
-    selection_size_limit_bytes: u64,
-    mime_types_size_bytes: u64,
+    return_error_on_timeout: bool,
+    limit_bytes: u64,
+    already_used_bytes: u64,
 ) -> Result<HashMap<Box<str>, Result<Box<[u8]>, Rc<ReadWithTimeoutError>>>, ReadWithTimeoutError> {
     // Check size limit.
-    let mut current_size = mime_types_size_bytes;
-    let mut exceeded_size_limit = current_size > selection_size_limit_bytes;
+    let mut current_size = already_used_bytes;
+    let mut exceeded_size_limit = current_size > limit_bytes;
 
     if exceeded_size_limit {
         return Err(ReadWithTimeoutError::SizeLimitExceeded);
@@ -86,6 +87,10 @@ pub(crate) fn read_with_timeout(
             .unwrap();
 
         if remaining_time == 0 {
+            if return_error_on_timeout {
+                return Err(ReadWithTimeoutError::Timeout);
+            }
+
             error_out_remaining_mime_types(
                 &mut mime_type_to_data,
                 remaining_fd_to_data,
@@ -97,6 +102,10 @@ pub(crate) fn read_with_timeout(
         // Wait for changes of readability with timeout.
         match unsafe { libc::poll(remaining_pfds.as_mut_ptr(), remaining_pfds.len() as u64, remaining_time) } {
             0 => {
+                if return_error_on_timeout {
+                    return Err(ReadWithTimeoutError::Timeout);
+                }
+
                 // Timeout occurred, error out the remaining mime types.
                 error_out_remaining_mime_types(
                     &mut mime_type_to_data,
@@ -151,7 +160,7 @@ pub(crate) fn read_with_timeout(
                                         // Check size limit first.
                                         current_size += size as u64;
 
-                                        if current_size > selection_size_limit_bytes {
+                                        if current_size > limit_bytes {
                                             exceeded_size_limit = true;
                                             return true;
                                         }

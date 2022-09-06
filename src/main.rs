@@ -81,6 +81,12 @@ fn main() {
         )
         .arg(
             arg!(
+                -t --"ignore-event-on-timeout" "Only handle selection events where no timeout occurred"
+            )
+            .required(false),
+        )
+        .arg(
+            arg!(
                 -l --"selection-size-limit" <BYTES> "Only handle selection events whose total data size does not exceed the size limit"
             )
             .required(false)
@@ -96,27 +102,27 @@ fn main() {
         .get_matches();
 
     let clipboard_type = *matches.get_one::<ClipboardType>("clipboard").unwrap();
-    let display_name: Option<OsString> = matches.get_one::<String>("display").map(|s| s.into());
-    let read_timeout: Duration = Duration::from_millis(*matches.get_one::<u64>("read-timeout").unwrap());
-    let write_timeout: Duration = Duration::from_millis(*matches.get_one::<u64>("write-timeout").unwrap());
-    let selection_size_limit_bytes: u64 = matches
+    let display_name = matches.get_one::<String>("display").map(|s| s.into());
+    let read_timeout = Duration::from_millis(*matches.get_one::<u64>("read-timeout").unwrap());
+    let write_timeout = Duration::from_millis(*matches.get_one::<u64>("write-timeout").unwrap());
+    let ignore_selection_event_on_timeout = matches.contains_id("ignore-event-on-timeout");
+    let selection_size_limit_bytes = matches
         .get_one::<u64>("selection-size-limit")
         .copied()
         .unwrap_or(u64::MAX);
-    let all_mime_type_regex: Option<Regex> =
-        matches
-            .get_one::<String>("mime-type-regex")
-            .map(|s| match Regex::new(s) {
-                Ok(regex) => regex,
-                Err(err) => {
-                    log::error!(
-                        target: log_default_target(),
-                        "Failed to parse the mime type regex. Error: {}",
-                        err
-                    );
-                    std::process::exit(1);
-                }
-            });
+    let all_mime_type_regex = matches
+        .get_one::<String>("mime-type-regex")
+        .map(|s| match Regex::new(s) {
+            Ok(regex) => regex,
+            Err(err) => {
+                log::error!(
+                    target: log_default_target(),
+                    "Failed to parse the mime type regex. Error: {}",
+                    err
+                );
+                std::process::exit(1);
+            }
+        });
 
     // Run main program
     handle_clipboard(Settings {
@@ -124,6 +130,7 @@ fn main() {
         display_name,
         read_timeout,
         write_timeout,
+        ignore_selection_event_on_timeout,
         selection_size_limit_bytes,
         all_mime_type_regex,
     });
@@ -135,6 +142,7 @@ struct Settings {
     display_name: Option<OsString>,
     read_timeout: Duration,
     write_timeout: Duration,
+    ignore_selection_event_on_timeout: bool,
     selection_size_limit_bytes: u64,
     all_mime_type_regex: Option<Regex>,
 }
@@ -771,6 +779,7 @@ fn read_pipes_to_mime_types_with_data(
     pipe_io::read_with_timeout(
         mime_types_with_pipes,
         settings.read_timeout,
+        settings.ignore_selection_event_on_timeout,
         settings.selection_size_limit_bytes,
         mime_types_size_bytes,
     )
