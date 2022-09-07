@@ -89,6 +89,12 @@ fn main() {
         )
         .arg(
             arg!(
+                -e --"ignore-event-on-error" "Only handle selection events where no error occurred"
+            )
+            .required(false),
+        )
+        .arg(
+            arg!(
                 -l --"selection-size-limit" <BYTES> "Only handle selection events whose total data size does not exceed the size limit"
             )
             .required(false)
@@ -114,6 +120,7 @@ fn main() {
     let read_timeout = Duration::from_millis(*matches.get_one::<u64>("read-timeout").unwrap());
     let write_timeout = Duration::from_millis(*matches.get_one::<u64>("write-timeout").unwrap());
     let ignore_selection_event_on_timeout = matches.contains_id("ignore-event-on-timeout");
+    let ignore_selection_event_on_error = matches.contains_id("ignore-event-on-error");
     let selection_size_limit_bytes = matches
         .get_one::<u64>("selection-size-limit")
         .copied()
@@ -140,6 +147,7 @@ fn main() {
         read_timeout,
         write_timeout,
         ignore_selection_event_on_timeout,
+        ignore_selection_event_on_error,
         selection_size_limit_bytes,
         interrupt_old_clipboard_requests,
         all_mime_type_regex,
@@ -153,6 +161,7 @@ struct Settings {
     read_timeout: Duration,
     write_timeout: Duration,
     ignore_selection_event_on_timeout: bool,
+    ignore_selection_event_on_error: bool,
     selection_size_limit_bytes: u64,
     interrupt_old_clipboard_requests: bool,
     all_mime_type_regex: Option<Regex>,
@@ -791,6 +800,7 @@ fn read_pipes_to_mime_types_with_data(
         mime_types_with_pipes,
         settings.read_timeout,
         settings.ignore_selection_event_on_timeout,
+        settings.ignore_selection_event_on_error,
         settings.selection_size_limit_bytes,
         mime_types_size_bytes,
     )
