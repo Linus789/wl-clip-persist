@@ -127,7 +127,7 @@ fn main() {
         .unwrap_or(u64::MAX);
     let interrupt_old_clipboard_requests = matches.contains_id("interrupt-old-clipboard-requests");
     let all_mime_type_regex = matches
-        .get_one::<String>("mime-type-regex")
+        .get_one::<String>("all-mime-type-regex")
         .map(|s| match Regex::new(s) {
             Ok(regex) => regex,
             Err(err) => {
