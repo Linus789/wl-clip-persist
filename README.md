@@ -37,13 +37,28 @@ wl-clip-persist --clipboard regular --display wayland-1
 *Default write timeout: 3000ms*
 
 It is possible to change the read and write timeouts.
-In this example, the read timeout is reduced to 50ms and the write timeout to 100ms.
+In this example, the read timeout is reduced to 50ms and the write timeout to 1000ms.
 ```
 wl-clip-persist --clipboard regular --read-timeout 50 --write-timeout 1000
 ```
 
-Currently, whenever we read the clipboard data it blocks our main thread. That means that until we haven’t read the entire data or the read timeout occurred, we won’t be able to see new clipboard events. It is even possible that while we are reading the clipboard data a new clipboard event occurs and we overwrite their clipboard data with our old data. When a read timeout occurs, the current clipboard is overwritten with the data that we were able to read until then. For example, when a clipboard event offers `image/png` and `text/plain` data and we are only able to read the `text/plain` data entirely until the timeout occurs, then the clipboard will be overwritten with our data that only offers `text/plain`.
+Currently, whenever we read the clipboard data it blocks our main thread. That means that until we haven’t read the entire data or the read timeout occurred, we won’t be able to see new clipboard events. It is even possible that while we are reading the clipboard data a new clipboard event occurs and we overwrite their clipboard data with our old data.
+
 When we write clipboard data (i.e. send the clipboard data to another program), though, we do that in a background thread.
+
+### Ignore event on timeout
+*Default: disabled*
+
+With `--ignore-event-on-timeout` only selection events where no read timeout occurred are handled. If a read timeout occurred and the selection event is ignored, you will still be able to paste the clipboard, but only for as long as the program you copied from is open.
+
+When this option is disabled and a read timeout occurs, the current clipboard is overwritten with the data that we were able to read until then. For example, when a clipboard event offers `image/png` and `text/plain` data and we are only able to read the `text/plain` data entirely until the timeout occurs, then the clipboard will be overwritten with our data that only offers `text/plain`.
+
+### Ignore event on error
+*Default: disabled*
+
+With `ignore-event-on-error` only selection events where no error occurred are handled. If an error occurred and the selection event is ignored, you will still be able to paste the clipboard, but only for as long as the program you copied from is open.
+
+When this option is disabled, it will try to read the entire data for as many MIME types as possible. For example, when a clipboard event offers `image/png` and `text/plain` data and we are only able to read the `text/plain` data entirely because a read error occurred for `image/png`, then the clipboard will be overwritten with our data that only offers `text/plain`.
 
 ### Filter
 *Default: no filter*
@@ -62,6 +77,23 @@ wl-clip-persist --clipboard regular --all-mime-type-regex '(?i)^(?!(?:image|audi
 ```
 
 Since the clipboard data might be huge (e.g. for images), this option might be helpful to avoid [blocking the main thread by reading the data](#timeout "also see here") for too long. Also, it might happen that the program we are copying the data from might freeze during the time we are reading the data, so it is possible to use this option to avoid these scenarios for specific data types like images.
+
+### Selection size limit
+*Default: practically unlimited*
+
+With `--selection-size-limit <BYTES>` only selection events whose total data size does not exceed the size limit are handled. If the size limit has been exceeded, you will still be able to paste the clipboard, but only for as long as the program you copied from is open.
+
+Ignore events that exceed the size of 1 MiB
+```
+wl-clip-persist --clipboard regular --selection-size-limit 1048576
+```
+
+This option can be used to limit the memory usage or to avoid [blocking the main thread by reading the data](#timeout "also see here") for too long.
+
+### Interrupt old clipboard requests
+*Default: disabled*
+
+With `--interrupt-old-clipboard-requests` old clipboard requests will be interrupted when the clipboard has been updated. In other words, before reading the new clipboard contents we make sure to interrupt sending the old clipboard to other programs and wait until the interrupt has finished. This option might be useful in combination with the [selection size limit](#selection-size-limit) to limit the memory usage, because the old clipboard can be dropped from the memory after the interrupt has finished.
 
 ### Logging
 You can modify the log level to see more of what is going on, e.g.
