@@ -38,8 +38,8 @@ fn main() {
     // Initialize logger
     env_logger::builder()
         .filter_level(log::LevelFilter::Info)
-        .parse_default_env()
         .format_timestamp_millis()
+        .parse_default_env()
         .init();
 
     // Parse command line args
