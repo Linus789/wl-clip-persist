@@ -56,7 +56,7 @@ When this option is disabled and a read timeout occurs, the current clipboard is
 ### Ignore event on error
 *Default: disabled*
 
-With `ignore-event-on-error` only selection events where no error occurred are handled. If an error occurred and the selection event is ignored, you will still be able to paste the clipboard, but only for as long as the program you copied from is open.
+With `--ignore-event-on-error` only selection events where no error occurred are handled. If an error occurred and the selection event is ignored, you will still be able to paste the clipboard, but only for as long as the program you copied from is open.
 
 When this option is disabled, it will try to read the entire data for as many MIME types as possible. For example, when a clipboard event offers `image/png` and `text/plain` data and we are only able to read the `text/plain` data entirely because a read error occurred for `image/png`, then the clipboard will be overwritten with our data that only offers `text/plain`.
 
