@@ -6,10 +6,12 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs::File;
+use std::io::{ErrorKind, Write};
 use std::ops::Deref;
 use std::os::unix::prelude::{AsRawFd, FromRawFd, IntoRawFd, MetadataExt};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use clap::builder::NonEmptyStringValueParser;
@@ -94,6 +96,12 @@ fn main() {
         )
         .arg(
             arg!(
+                -i --"interrupt-old-clipboard-requests" "Interrupt trying to send the old clipboard to other programs when the clipboard has been updated"
+            )
+            .required(false),
+        )
+        .arg(
+            arg!(
                 -f --"all-mime-type-regex" <REGEX> "Only handle selection events where all offered MIME types have a match for the regex"
             )
             .required(false)
@@ -110,6 +118,7 @@ fn main() {
         .get_one::<u64>("selection-size-limit")
         .copied()
         .unwrap_or(u64::MAX);
+    let interrupt_old_clipboard_requests = matches.contains_id("interrupt-old-clipboard-requests");
     let all_mime_type_regex = matches
         .get_one::<String>("mime-type-regex")
         .map(|s| match Regex::new(s) {
@@ -132,6 +141,7 @@ fn main() {
         write_timeout,
         ignore_selection_event_on_timeout,
         selection_size_limit_bytes,
+        interrupt_old_clipboard_requests,
         all_mime_type_regex,
     });
 }
@@ -144,6 +154,7 @@ struct Settings {
     write_timeout: Duration,
     ignore_selection_event_on_timeout: bool,
     selection_size_limit_bytes: u64,
+    interrupt_old_clipboard_requests: bool,
     all_mime_type_regex: Option<Regex>,
 }
 
@@ -612,7 +623,7 @@ fn handle_offer_events(
                 data,
                 clipboard_manager,
                 &selection.fd_from_own_app,
-                settings.write_timeout,
+                settings,
                 is_primary_clipboard,
             );
 
@@ -814,7 +825,7 @@ fn create_data_source(
     mime_types_to_data: HashMap<Box<str>, Box<[u8]>>,
     clipboard_manager: &Main<ZwlrDataControlManagerV1>,
     fd_from_own_app: &Rc<RefCell<HashMap<FdIdentifier, bool>>>,
-    write_timout: Duration,
+    settings: &Settings,
     is_primary_clipboard: bool,
 ) -> Main<ZwlrDataControlSourceV1> {
     let clipboard_type_str_title = get_clipboard_type_str(is_primary_clipboard, true);
@@ -828,8 +839,25 @@ fn create_data_source(
         data_source.offer(mime_type.to_string());
     }
 
+    // Create interrupt pipes
+    let (interrupt_read, interrupt_write) = if settings.interrupt_old_clipboard_requests {
+        let Pipe { mut read, mut write } = Pipe::new().expect("Failed to create pipe");
+
+        for fd in [&mut read, &mut write] {
+            fd.set_non_blocking(true)
+                .expect("Failed to enable the non-blocking IO mode of the file descriptor");
+        }
+
+        (Some(Arc::new(read)), Some(RefCell::new(write)))
+    } else {
+        (None, None)
+    };
+
+    // Set clipboard request handler
+    let mut write_threads: Option<Vec<JoinHandle<_>>> = Some(Vec::new());
     let mime_types_to_data = Arc::new(mime_types_to_data);
     let fd_from_own_app2 = fd_from_own_app.clone();
+    let write_timeout = settings.write_timeout;
 
     data_source.quick_assign(move |data_source, source_event, _| {
         match source_event {
@@ -870,12 +898,15 @@ fn create_data_source(
                 // so we do not block the main thread.
                 let fd = fd_file.into_raw_fd();
                 let mime_types_to_data2 = mime_types_to_data.clone();
+                let interrupt_read2 = interrupt_read.clone();
 
-                std::thread::spawn(move || {
+                write_threads.as_mut().unwrap().push(std::thread::spawn(move || {
                     let data = mime_types_to_data2.get(&mime_type_boxed).unwrap();
                     let write = unsafe { FileDescriptor::from_raw_fd(fd) };
 
-                    if let Err(err) = pipe_io::write_with_timeout(write, data, write_timout) {
+                    if let Err(err) =
+                        pipe_io::write_with_timeout(write, data, write_timeout, interrupt_read2.as_deref())
+                    {
                         log::warn!(
                             target: &log_seat_target(seat_id),
                             "{}\nFailed to send {} clipboard data for mime type: {}",
@@ -884,15 +915,46 @@ fn create_data_source(
                             mime_type_boxed
                         );
                     }
-                });
+                }));
             }
             // This data source is no longer valid.
             // The data source has been replaced by another data source.
             // The client should clean up and destroy this data source.
             SourceEvent::Cancelled => {
                 let data_source_id = data_source.as_ref().id();
+
+                if let Some(write) = &interrupt_write {
+                    // Notify write threads that they should stop
+                    let mut write_handle = write.borrow_mut();
+
+                    'write: loop {
+                        match write_handle.write(&[65]) {
+                            Ok(size) if size == 0 => {
+                                panic!("Failed to write to the interrupt file descriptor");
+                            }
+                            Ok(_) => break 'write,
+                            Err(err) if err.kind() == ErrorKind::Interrupted => {
+                                continue 'write;
+                            }
+                            Err(err) => {
+                                panic!("Failed to write to the interrupt file descriptor. Error: {}", err);
+                            }
+                        }
+                    }
+
+                    drop(write_handle);
+
+                    // Wait until interrupt has finished
+                    for join_handle in write_threads.take().unwrap() {
+                        join_handle
+                            .join()
+                            .expect("Failed to wait for the write thread to finish");
+                    }
+                }
+
                 // Destroy the current data source.
                 data_source.destroy();
+
                 log::trace!(
                     target: &log_seat_target(seat_id),
                     "Destroyed {} clipboard data source {}",

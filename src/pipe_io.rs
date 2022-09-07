@@ -255,20 +255,32 @@ pub(crate) fn write_with_timeout(
     mut file: FileDescriptor,
     mut data: &[u8],
     timeout: Duration,
+    interrupt_read: Option<&FileDescriptor>,
 ) -> Result<(), WriteWithTimeoutError> {
     if let Err(err) = file.set_non_blocking(true) {
         return Err(WriteWithTimeoutError::NonBlockingIOMode(err));
     }
 
-    let mut pfd = libc::pollfd {
+    let write_pfd = libc::pollfd {
         fd: file.as_raw_fd(),
         events: libc::POLLOUT,
         revents: 0,
     };
 
+    let mut pfds: Box<[libc::pollfd]> = if let Some(interrupt_read) = interrupt_read {
+        let interrupt_pfd = libc::pollfd {
+            fd: interrupt_read.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        Box::new([write_pfd, interrupt_pfd])
+    } else {
+        Box::new([write_pfd])
+    };
+
     let end_time = Instant::now() + timeout;
 
-    while !data.is_empty() {
+    'outer: while !data.is_empty() {
         let remaining_time = end_time
             .saturating_duration_since(Instant::now())
             .as_millis()
@@ -279,7 +291,7 @@ pub(crate) fn write_with_timeout(
             return Err(WriteWithTimeoutError::Timeout);
         }
 
-        match unsafe { libc::poll(&mut pfd, 1, remaining_time) } {
+        match unsafe { libc::poll(pfds.as_mut_ptr(), pfds.len() as u64, remaining_time) } {
             0 => {
                 return Err(WriteWithTimeoutError::Timeout);
             }
@@ -287,23 +299,39 @@ pub(crate) fn write_with_timeout(
                 let err = std::io::Error::last_os_error();
                 return Err(WriteWithTimeoutError::Poll(err));
             }
-            1.. => 'write: loop {
-                match file.write(data) {
-                    Ok(size) if size == 0 => {
-                        return Err(WriteWithTimeoutError::WriteStopped);
-                    }
-                    Ok(size) => {
-                        data = &data[size..];
-                        break 'write;
-                    }
-                    Err(err) if err.kind() == ErrorKind::Interrupted => {
-                        continue 'write;
-                    }
-                    Err(err) => {
-                        return Err(WriteWithTimeoutError::Write(err));
-                    }
+            1.. => {
+                if interrupt_read.is_some() && pfds.last().unwrap().revents & libc::POLLIN != 0 {
+                    return Err(WriteWithTimeoutError::Interrupt);
                 }
-            },
+
+                let write_pfd = pfds.first_mut().unwrap();
+
+                if write_pfd.revents == 0 {
+                    // We are not able to write data, so skip
+                    continue 'outer;
+                }
+
+                'write: loop {
+                    match file.write(data) {
+                        Ok(size) if size == 0 => {
+                            return Err(WriteWithTimeoutError::WriteStopped);
+                        }
+                        Ok(size) => {
+                            data = &data[size..];
+                            break 'write;
+                        }
+                        Err(err) if err.kind() == ErrorKind::Interrupted => {
+                            continue 'write;
+                        }
+                        Err(err) => {
+                            return Err(WriteWithTimeoutError::Write(err));
+                        }
+                    };
+                }
+
+                // Make the pollfd re-usable for the next poll call
+                write_pfd.revents = 0;
+            }
             return_value => {
                 return Err(WriteWithTimeoutError::PollInvalidReturnValue(return_value));
             }
@@ -321,6 +349,7 @@ pub(crate) enum WriteWithTimeoutError {
     Write(std::io::Error),
     WriteStopped,
     Timeout,
+    Interrupt,
 }
 
 impl Display for WriteWithTimeoutError {
@@ -342,6 +371,7 @@ impl Display for WriteWithTimeoutError {
             WriteWithTimeoutError::Write(err) => write!(f, "Error while writing to file descriptor: {}", err),
             WriteWithTimeoutError::WriteStopped => write!(f, "Failed to write whole buffer to the file descriptor"),
             WriteWithTimeoutError::Timeout => write!(f, "Timed out writing to file descriptor"),
+            WriteWithTimeoutError::Interrupt => write!(f, "Received interrupt request"),
         }
     }
 }
