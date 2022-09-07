@@ -1,6 +1,6 @@
 [package]
 name = "wl-clip-persist"
-version = "0.2.1"
+version = "0.3.0"
 description = "Keep Wayland clipboard even after programs close"
 authors = ["Linus789"]
 readme = "README.md"
