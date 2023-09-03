@@ -495,14 +495,26 @@ fn handle_clipboard(mut settings: Settings) {
             .unwrap_or_else(|err| panic!("{}", err));
 
         // Handle selection offers
-        handle_offer_events(
-            &display,
-            &mut event_queue,
-            &seats,
-            clipboard_manager_instance,
-            &settings,
-        );
+        'handle_events: loop {
+            let retry = handle_offer_events(
+                &display,
+                &mut event_queue,
+                &seats,
+                clipboard_manager_instance,
+                &settings,
+            );
+
+            if retry == Retry::No {
+                break 'handle_events;
+            }
+        }
     }
+}
+
+#[derive(PartialEq, Eq)]
+enum Retry {
+    Yes,
+    No,
 }
 
 /// Handles a selection event by trying to copy the selection data
@@ -514,7 +526,7 @@ fn handle_offer_events(
     seats: &Rc<RefCell<HashMap<u32, Main<WlSeat>>>>,
     clipboard_manager: &Main<ZwlrDataControlManagerV1>,
     settings: &Settings,
-) {
+) -> Retry {
     let mut got_new_pipes = false;
 
     // First, create some pipes we can read from.
@@ -553,15 +565,17 @@ fn handle_offer_events(
     if !got_new_pipes {
         // In case we have not gotten any new pipes to read,
         // we can just return because there is nothing more to do.
-        return;
+        return Retry::No;
     }
 
     // Others programs need to know we want to read some data from the pipes,
     // so we can actually get the clipboard data.
     if let Err(err) = EventQueueMethod::SyncRoundtrip.run(event_queue, display) {
         log::error!(target: log_default_target(), "{}", err);
-        return;
+        return Retry::No;
     }
+
+    let mut got_new_selection_event = false;
 
     // Then, read the data from the pipes and update the selection if everything is okay.
     seats.deref().borrow().values().for_each(|seat| {
@@ -586,6 +600,7 @@ fn handle_offer_events(
             if selection.offer.is_some() {
                 // We got a new selection offer during the synchronous roundtrip.
                 // So do not overwrite the current selection with old data.
+                got_new_selection_event = true;
                 log::trace!(
                     target: &log_seat_target(seat_id),
                     "{} clipboard got a new selection event, so ignore the old one",
@@ -640,6 +655,12 @@ fn handle_offer_events(
             update_selection(seat_id, data_device, data_source, is_primary_clipboard);
         }
     });
+
+    if got_new_selection_event {
+        Retry::Yes
+    } else {
+        Retry::No
+    }
 }
 
 /// A unique identifier for file descriptors.
