@@ -1028,29 +1028,37 @@ enum EventQueueMethod {
     Dispatch,
 }
 
+impl std::fmt::Display for EventQueueMethod {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", match self {
+            Self::SyncRoundtrip => "synchronous roundtrip",
+            Self::Dispatch => "dispatch"
+        })
+    }
+}
+
 impl EventQueueMethod {
     /// Runs the given event queue method.
     fn run(&self, event_queue: &mut EventQueue, display: &Display) -> Result<(), String> {
+        log::trace!("Pre {}", self);
+
         let result = match self {
-            EventQueueMethod::SyncRoundtrip => event_queue.sync_roundtrip(&mut (), |_, _, _| {}),
-            EventQueueMethod::Dispatch => event_queue.dispatch(&mut (), |_, _, _| {}),
+            Self::SyncRoundtrip => event_queue.sync_roundtrip(&mut (), |_, _, _| {}),
+            Self::Dispatch => event_queue.dispatch(&mut (), |_, _, _| {}),
         };
 
         if let Err(err) = result {
             return Err(format!("{}. Error: {}", self.get_event_queue_error(display), err));
         }
 
+        log::trace!("Post {}", self);
+
         Ok(())
     }
 
     /// Constructs an error message for cases where the event queue has failed.
     fn get_event_queue_error(&self, display: &Display) -> String {
-        let mut default = String::from("Event Queue: failed ");
-
-        match self {
-            EventQueueMethod::SyncRoundtrip => default += "synchronous roundtrip",
-            EventQueueMethod::Dispatch => default += "dispatch",
-        }
+        let mut default = format!("Event Queue: failed {}", self);
 
         if let Some(protocol_error) = display.protocol_error() {
             let _ = write!(default, ". Last Protocol Error: {:?}", protocol_error);
