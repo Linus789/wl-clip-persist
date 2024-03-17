@@ -81,6 +81,29 @@ You can modify the log level to see more of what is going on, e.g.
 RUST_LOG=trace wl-clip-persist --clipboard regular
 ```
 
+## Troubleshooting
+### Primary selection mode breaks the selection system ([#3](https://github.com/Linus789/wl-clip-persist/issues/3))
+> especially those based on GTK, e.g. Thunar and Inkscape
+
+> [...] once you start using the primary mode or both, it becomes impossible to select text, because once you release the cursor to finalize the selection, it disappears.
+
+**Solution:**
+Use the regular clipboard only, e.g.
+```
+wl-clip-persist --clipboard regular
+```
+
+### Inkscape crashes when copy-pasting anything ([#7](https://github.com/Linus789/wl-clip-persist/issues/7))
+**Solution:**
+```
+wl-clip-persist --clipboard regular --all-mime-type-regex '(?i)^(?!image/x-inkscape-svg).+'
+```
+
+## FAQ
+### Is it possible to have a clipboard history?
+It is perfectly possible to use a clipboard history application alongside wl-clip-persist.
+For example [cliphist](https://github.com/sentriz/cliphist) will work.
+
 ## Build from source
 * Install `rustup` to get the `rust` compiler installed on your system. [Install rustup](https://www.rust-lang.org/en-US/install.html)
 * Rust version 1.76.0 or later is required
