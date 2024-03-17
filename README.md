@@ -25,6 +25,11 @@ Regular and Primary clipboard
 wl-clip-persist --clipboard both
 ```
 
+> [!NOTE]
+> The general recommendation is to operate on the regular clipboard only,
+since the primary clipboard seems to have unintended side effects for some applications,
+[see here](#primary-selection-mode-breaks-the-selection-system-3).
+
 ## Optional arguments
 ### Write timeout
 *Default write timeout: 3000 ms*
