@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::ffi::CStr;
 use std::fs::File;
-use std::io::Cursor;
 use std::ops::Deref;
 use std::os::fd::IntoRawFd;
 use std::os::unix::io::FromRawFd;
@@ -13,7 +12,6 @@ use std::sync::Arc;
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt as _;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio_io_timeout::TimeoutWriter;
 use wayrs_client::global::*;
 use wayrs_client::object::ObjectId;
 use wayrs_client::protocol::*;
@@ -1080,35 +1078,97 @@ fn data_source_cb(
             // Write the data to the file descriptor in a worker thread,
             // so we do not block the main thread.
             let data_map_clone = Arc::clone(data_map);
-            let tokio_file = tokio::fs::File::from_std(fd_file);
+            let mut tokio_file = tokio::fs::File::from_std(fd_file);
             let write_timeout = event_context.state.settings.write_timeout;
 
             tokio::spawn(async move {
-                let mut timeout_writer = TimeoutWriter::new(tokio_file);
-                timeout_writer.set_timeout(Some(write_timeout));
-                tokio::pin!(timeout_writer);
+                let data = data_map_clone.get(&mime_type_boxed).unwrap().deref();
 
-                let mut data_buf = Cursor::new(data_map_clone.get(&mime_type_boxed).unwrap().deref());
-
-                if let Err(err) = timeout_writer.write_all_buf(&mut data_buf).await {
-                    log::debug!(
-                        target: &log_seat_target(seat_name),
-                        "{} clipboard data source {}: failed to send clipboard data for mime type '{}': {}",
-                        selection_type.get_clipboard_type_str(true),
-                        event_context.proxy.id().as_u32(),
-                        mime_type_boxed.to_string_lossy(),
-                        err,
-                    );
-                } else if let Err(err) = timeout_writer.flush().await {
-                    log::debug!(
-                        target: &log_seat_target(seat_name),
-                        "{} clipboard data source {}: failed to flush clipboard data for mime type '{}': {}",
-                        selection_type.get_clipboard_type_str(true),
-                        event_context.proxy.id().as_u32(),
-                        mime_type_boxed.to_string_lossy(),
-                        err,
-                    );
+                enum TimeoutResult {
+                    Ok,
+                    IoError(std::io::Error),
+                    Timeout,
                 }
+
+                let deadline = tokio::time::Instant::now() + write_timeout;
+                let write_result = tokio::select! {
+                    biased;
+
+                    res = tokio_file.write_all(data) => {
+                        match res {
+                            Ok(()) => TimeoutResult::Ok,
+                            Err(err) => TimeoutResult::IoError(err),
+                        }
+                    }
+                    _ = tokio::time::sleep_until(deadline) => {
+                        TimeoutResult::Timeout
+                    }
+                };
+
+                drop(data_map_clone);
+
+                match write_result {
+                    TimeoutResult::Ok => {
+                        let flush_result = tokio::select! {
+                            biased;
+
+                            res = tokio_file.flush() => {
+                                match res {
+                                    Ok(()) => TimeoutResult::Ok,
+                                    Err(err) => TimeoutResult::IoError(err),
+                                }
+                            }
+                            _ = tokio::time::sleep_until(deadline) => {
+                                TimeoutResult::Timeout
+                            }
+                        };
+
+                        match flush_result {
+                            TimeoutResult::Ok => {}
+                            TimeoutResult::IoError(err) => {
+                                log::debug!(
+                                    target: &log_seat_target(seat_name),
+                                    "{} clipboard data source {}: failed to flush clipboard data for mime type '{}': {}",
+                                    selection_type.get_clipboard_type_str(true),
+                                    event_context.proxy.id().as_u32(),
+                                    mime_type_boxed.to_string_lossy(),
+                                    err,
+                                );
+                            }
+                            TimeoutResult::Timeout => {
+                                log::debug!(
+                                    target: &log_seat_target(seat_name),
+                                    "{} clipboard data source {}: failed to flush clipboard data for mime type '{}': timed out",
+                                    selection_type.get_clipboard_type_str(true),
+                                    event_context.proxy.id().as_u32(),
+                                    mime_type_boxed.to_string_lossy(),
+                                );
+                            }
+                        }
+                    }
+                    TimeoutResult::IoError(err) => {
+                        log::debug!(
+                            target: &log_seat_target(seat_name),
+                            "{} clipboard data source {}: failed to write clipboard data for mime type '{}': {}",
+                            selection_type.get_clipboard_type_str(true),
+                            event_context.proxy.id().as_u32(),
+                            mime_type_boxed.to_string_lossy(),
+                            err,
+                        );
+                    }
+                    TimeoutResult::Timeout => {
+                        log::debug!(
+                            target: &log_seat_target(seat_name),
+                            "{} clipboard data source {}: failed to write clipboard data for mime type '{}': timed out",
+                            selection_type.get_clipboard_type_str(true),
+                            event_context.proxy.id().as_u32(),
+                            mime_type_boxed.to_string_lossy(),
+                        );
+                    }
+                }
+
+                // Explicitly close file descriptor
+                drop(tokio_file);
             });
         }
         zwlr_data_control_source_v1::Event::Cancelled => {
