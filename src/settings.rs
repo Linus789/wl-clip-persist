@@ -1,10 +1,10 @@
 use std::time::Duration;
 
 use clap::builder::NonEmptyStringValueParser;
-use clap::{arg, crate_description, crate_name, crate_version, value_parser, Command};
+use clap::{arg, crate_description, crate_name, crate_version, value_parser, ArgAction, Command};
 use fancy_regex::Regex;
 
-use crate::logger::log_default_target;
+use crate::logger::{self, log_default_target};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
 pub(crate) enum ClipboardType {
@@ -76,7 +76,8 @@ pub(crate) fn get_settings() -> Settings {
             arg!(
                 -e --"ignore-event-on-error" "Only handle selection events where no error occurred"
             )
-            .required(false),
+            .required(false)
+            .action(ArgAction::SetTrue),
         )
         .arg(
             arg!(
@@ -92,11 +93,22 @@ pub(crate) fn get_settings() -> Settings {
             .required(false)
             .value_parser(NonEmptyStringValueParser::new()),
         )
+        .arg(
+            arg!(
+                --"disable-timestamps" "Do not show timestamps in the log messages"
+            )
+            .required(false)
+            .action(ArgAction::SetTrue),
+        )
         .get_matches();
+
+    // Initialize the logger here, because log is used to inform about invalid settings
+    let disable_timestamps = matches.get_flag("disable-timestamps");
+    logger::init_logger(!disable_timestamps);
 
     let clipboard_type = *matches.get_one::<ClipboardType>("clipboard").unwrap();
     let write_timeout = Duration::from_millis(*matches.get_one::<u64>("write-timeout").unwrap());
-    let ignore_selection_event_on_error = matches.contains_id("ignore-event-on-error");
+    let ignore_selection_event_on_error = matches.get_flag("ignore-event-on-error");
     let selection_size_limit_bytes = matches
         .get_one::<u64>("selection-size-limit")
         .copied()

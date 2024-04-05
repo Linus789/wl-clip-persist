@@ -15,7 +15,6 @@ const RECONNECT_TIMEOUT: Duration = Duration::from_millis(100);
 // One worker thread for writing the clipboard data
 #[tokio::main(flavor = "multi_thread", worker_threads = 1)]
 async fn main() {
-    logger::init_logger();
     let settings = get_settings();
     let mut is_reconnect = false;
     let mut connection_tries = 0;
