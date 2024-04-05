@@ -100,7 +100,9 @@ pub(crate) async fn run(settings: Settings, is_reconnect: bool) -> Result<Infall
                 let seat_name = seat.seat_name;
                 let data_control_device = seat.data_control_device;
 
-                for (selection_type, selection_state) in seat.selections_iter_mut() {
+                for (selection_type, selection_state, selection_offers) in
+                    seat.selections_iter_mut_with_selection_offers()
+                {
                     let Some(selection_state) = selection_state else {
                         continue;
                     };
@@ -116,6 +118,7 @@ pub(crate) async fn run(settings: Settings, is_reconnect: bool) -> Result<Infall
                     set_clipboard_futures.push(handle_pipes_selection_state(
                         seat_name,
                         data_control_device,
+                        selection_offers,
                         selection_type,
                         selection_state,
                         state.settings.selection_size_limit_bytes,
@@ -137,30 +140,21 @@ pub(crate) async fn run(settings: Settings, is_reconnect: bool) -> Result<Infall
 
                     match mime_types_with_data {
                         Some(Ok(mime_types_with_data)) => {
-                            let data = Arc::new(mime_types_with_data.data);
-                            let mime_type_data = Arc::clone(&data);
-                            let source = data_control_manager.create_data_source_with_cb(&mut connection, move |event_context| {
-                                data_source_cb(mime_types_with_data.seat_name, mime_types_with_data.selection_type, event_context, &data);
-                            });
-                            for mime_type in mime_type_data.keys() {
-                                source.offer(&mut connection, mime_type.clone().into_c_string());
+                            if mime_types_with_data.selection_offers.is_empty() {
+                                set_clipboard(
+                                    &mut connection,
+                                    data_control_manager,
+                                    mime_types_with_data.seat_name,
+                                    mime_types_with_data.data_control_device,
+                                    mime_types_with_data.selection_state,
+                                    mime_types_with_data.selection_type,
+                                    mime_types_with_data.data,
+                                );
+                                break 'wait false;
+                            } else {
+                                // Set clipboard later to avoid data race
+                                mime_types_with_data.selection_state.got_data(mime_types_with_data.data);
                             }
-                            let source_id = source.id().as_u32();
-
-                            match mime_types_with_data.selection_type {
-                                SelectionType::Regular => mime_types_with_data.data_control_device.set_selection(&mut connection, Some(source)),
-                                SelectionType::Primary => mime_types_with_data.data_control_device.set_primary_selection(&mut connection, Some(source)),
-                            }
-
-                            log::trace!(
-                                target: &log_seat_target(mime_types_with_data.seat_name),
-                                "Created {} clipboard data source {}",
-                                mime_types_with_data.selection_type.get_clipboard_type_str(false),
-                                source_id,
-                            );
-
-                            mime_types_with_data.selection_state.reset(&mut connection);
-                            break 'wait false;
                         }
                         Some(Err(selection_state)) => {
                             // Selection event got ignored
@@ -177,6 +171,40 @@ pub(crate) async fn run(settings: Settings, is_reconnect: bool) -> Result<Infall
             handle_new_selection_state(&mut connection, &mut state)
                 .await
                 .map_err(WaylandError::IoError)?;
+
+            // Now that we received and dispatched new wayland events, check if we can set the clipboard now.
+            // Also notice, we do this before the async flush.
+            for seat in state.seats.values_mut() {
+                if !seat.selection_offers.is_empty() {
+                    // There are still pending offers, therefore avoid...
+                    continue;
+                }
+
+                let seat_name = seat.seat_name;
+                let data_control_device = seat.data_control_device;
+
+                for (selection_type, selection_state) in seat.selections_iter_mut() {
+                    let Some(selection_state) = selection_state else {
+                        continue;
+                    };
+
+                    let SeatSelectionState::GotData { data } = selection_state else {
+                        continue;
+                    };
+
+                    let owned_data = std::mem::take(data);
+
+                    set_clipboard(
+                        &mut connection,
+                        data_control_manager,
+                        seat_name,
+                        data_control_device,
+                        selection_state,
+                        selection_type,
+                        owned_data,
+                    );
+                }
+            }
         }
 
         connection.async_flush().await.map_err(WaylandError::IoError)?;
@@ -711,6 +739,7 @@ async fn handle_new_selection_state(connection: &mut Connection<State>, state: &
                         pipes: _,
                         bytes_read: _,
                     } => None,
+                    SeatSelectionState::GotData { data: _ } => None,
                     SeatSelectionState::GotClear => {
                         selection_state.reset(connection);
                         None
@@ -964,14 +993,15 @@ async fn read_pipes_to_data(
 /// (i.e. [`read_pipes_to_data`] returned [`Ok`]),
 /// the value in [`SeatSelectionState::GotPipes::pipes`]
 /// is replaced with an empty [`Vec`].
-async fn handle_pipes_selection_state(
+async fn handle_pipes_selection_state<'a>(
     seat_name: u32,
     data_control_device: ZwlrDataControlDeviceV1,
+    selection_offers: &'a HashMap<ObjectId, Offer>,
     selection_type: SelectionType,
-    selection_state: &mut SeatSelectionState,
+    selection_state: &'a mut SeatSelectionState,
     size_limit: u64,
     ignore_selection_event_on_error: bool,
-) -> Result<MimeTypesWithData<'_>, &mut SeatSelectionState> {
+) -> Result<MimeTypesWithData<'a>, &'a mut SeatSelectionState> {
     let SeatSelectionState::GotPipes { pipes, bytes_read } = selection_state else {
         unreachable!();
     };
@@ -1018,6 +1048,7 @@ async fn handle_pipes_selection_state(
     Ok(MimeTypesWithData {
         seat_name,
         data_control_device,
+        selection_offers,
         selection_state,
         selection_type,
         data,
@@ -1215,4 +1246,39 @@ fn data_source_cb(
             );
         }
     }
+}
+
+// Sets the clipboard for a specific seat and selection type.
+fn set_clipboard(
+    connection: &mut Connection<State>,
+    data_control_manager: ZwlrDataControlManagerV1,
+    seat_name: u32,
+    data_control_device: ZwlrDataControlDeviceV1,
+    selection_state: &mut SeatSelectionState,
+    selection_type: SelectionType,
+    data: HashMap<Box<CStr>, Box<[u8]>>,
+) {
+    let data = Arc::new(data);
+    let mime_type_data = Arc::clone(&data);
+    let source = data_control_manager.create_data_source_with_cb(connection, move |event_context| {
+        data_source_cb(seat_name, selection_type, event_context, &data);
+    });
+    for mime_type in mime_type_data.keys() {
+        source.offer(connection, mime_type.clone().into_c_string());
+    }
+    let source_id = source.id().as_u32();
+
+    match selection_type {
+        SelectionType::Regular => data_control_device.set_selection(connection, Some(source)),
+        SelectionType::Primary => data_control_device.set_primary_selection(connection, Some(source)),
+    }
+
+    log::trace!(
+        target: &log_seat_target(seat_name),
+        "Created {} clipboard data source {}",
+        selection_type.get_clipboard_type_str(false),
+        source_id,
+    );
+
+    selection_state.reset(connection);
 }

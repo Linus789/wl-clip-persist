@@ -108,6 +108,28 @@ impl Seat {
         )))
     }
 
+    /// Iterates over mutable regular and primary selection data, with the selection offers also being present.
+    pub(crate) fn selections_iter_mut_with_selection_offers(
+        &mut self,
+    ) -> impl Iterator<
+        Item = (
+            SelectionType,
+            Option<&mut SeatSelectionState>,
+            &HashMap<ObjectId, Offer>,
+        ),
+    > {
+        std::iter::once((
+            SelectionType::Regular,
+            self.regular_selection.as_mut(),
+            &self.selection_offers,
+        ))
+        .chain(std::iter::once((
+            SelectionType::Primary,
+            self.primary_selection.as_mut(),
+            &self.selection_offers,
+        )))
+    }
+
     /// Destroys the seat.
     pub(crate) fn destroy(self, conn: &mut Connection<State>) {
         for offer in self.selection_offers.into_values() {
@@ -173,6 +195,7 @@ pub(crate) enum ReadToDataError {
 pub(crate) struct MimeTypesWithData<'a> {
     pub(crate) seat_name: u32,
     pub(crate) data_control_device: ZwlrDataControlDeviceV1,
+    pub(crate) selection_offers: &'a HashMap<ObjectId, Offer>,
     pub(crate) selection_state: &'a mut SeatSelectionState,
     pub(crate) selection_type: SelectionType,
     pub(crate) data: HashMap<Box<CStr>, Box<[u8]>>,
@@ -206,6 +229,16 @@ pub(crate) enum SeatSelectionState {
         pipes: Vec<MimeTypeAndPipe>,
         bytes_read: u64,
     },
+    /// We got the data, but cannot set the clipboard yet.
+    /// We use this state, to minimize the risk of data races.
+    /// The data race we avoid would be triggered by the following sequence of events:
+    ///
+    /// 1. Read pipes of new clipboard event
+    /// 2. We receive a new offer, but do not know whether the offer will be a regular or primary selection event yet
+    /// 3. While we wait for that info, the pipes have been fully read, and we set the data as the new clipboard
+    ///    => By doing that, we overwrite the new offer if it is from the same selection type
+    ///    => Therefore, if there is an offer whose selection type is unknown, we should wait before setting the clipboard
+    GotData { data: HashMap<Box<CStr>, Box<[u8]>> },
     /// The selection was cleared.
     GotClear,
     /// The selection was updated, but we will not save the data in memory.
@@ -262,6 +295,20 @@ impl SeatSelectionState {
         };
     }
 
+    /// Switches to the [`SeatSelectionState::GotData`] state.
+    pub(crate) fn got_data(&mut self, data: HashMap<Box<CStr>, Box<[u8]>>) {
+        let SeatSelectionState::GotPipes {
+            pipes: _,
+            bytes_read: _,
+        } = self
+        else {
+            // The state already got updated to something newer, therefore return early
+            return;
+        };
+
+        *self = SeatSelectionState::GotData { data };
+    }
+
     /// Switches to the [`SeatSelectionState::GotClear`] state.
     pub(crate) fn got_clear(&mut self, conn: &mut Connection<State>) {
         // Destroy old wayland objects
@@ -294,6 +341,7 @@ impl SeatSelectionState {
                 pipes: _,
                 bytes_read: _,
             } => {}
+            SeatSelectionState::GotData { data: _ } => {}
             SeatSelectionState::GotClear => {}
             SeatSelectionState::GotIgnoredEvent => {}
         };
