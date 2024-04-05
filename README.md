@@ -69,7 +69,7 @@ wl-clip-persist --clipboard regular --all-mime-type-regex '(?i)^(?!(?:image|audi
 ```
 
 ### Selection size limit
-*Default: practically unlimited*
+*Default: no limit*
 
 With `--selection-size-limit <BYTES>` only selection events whose total data size does not exceed the size limit are handled. If the size limit has been exceeded, you will still be able to paste the clipboard, but only for as long as the program you copied from is open.
 

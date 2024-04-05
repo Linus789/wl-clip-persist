@@ -464,13 +464,15 @@ fn data_control_offer_cb(
 
             offer.bytes_read += mime_type.as_bytes().len() as u64;
 
-            if offer.bytes_read > event_context.state.settings.selection_size_limit_bytes {
-                log::trace!(
-                    target: &log_seat_target(seat_name),
-                    "New advertised mime type: exceeded selection size limit",
-                );
-                offer.bytes_exceeded_limit = true;
-                return;
+            if let Some(selection_size_limit_bytes) = event_context.state.settings.selection_size_limit_bytes {
+                if offer.bytes_read > selection_size_limit_bytes {
+                    log::trace!(
+                        target: &log_seat_target(seat_name),
+                        "New advertised mime type: exceeded selection size limit",
+                    );
+                    offer.bytes_exceeded_limit = true;
+                    return;
+                }
             }
 
             offer.mime_types.push(mime_type);
@@ -854,7 +856,7 @@ async fn handle_new_selection_state(connection: &mut Connection<State>, state: &
 async fn read_pipe_to_data<'a>(
     mime_type_and_pipe: &'a mut MimeTypeAndPipe,
     bytes_read: Rc<RefCell<&mut u64>>,
-    size_limit: u64,
+    size_limit: Option<u64>,
 ) -> PipeDataResult<'a> {
     if mime_type_and_pipe.data_read.is_none() {
         mime_type_and_pipe.data_read = Some(Ok(Vec::with_capacity(32)));
@@ -872,13 +874,15 @@ async fn read_pipe_to_data<'a>(
                 // Check size limit first
                 **bytes_read.borrow_mut() += size as u64;
 
-                if **bytes_read.borrow() > size_limit {
-                    mime_type_and_pipe.read_finished = true;
+                if let Some(size_limit) = size_limit {
+                    if **bytes_read.borrow() > size_limit {
+                        mime_type_and_pipe.read_finished = true;
 
-                    return PipeDataResult {
-                        mime_type_and_pipe,
-                        data_result: Err(ReadToDataError::SizeLimitExceeded),
-                    };
+                        return PipeDataResult {
+                            mime_type_and_pipe,
+                            data_result: Err(ReadToDataError::SizeLimitExceeded),
+                        };
+                    }
                 }
 
                 // Add data
@@ -928,7 +932,7 @@ async fn read_pipe_to_data<'a>(
 async fn read_pipes_to_data(
     pipes: &mut [MimeTypeAndPipe],
     bytes_read: &mut u64,
-    size_limit: u64,
+    size_limit: Option<u64>,
     ignore_selection_event_on_error: bool,
 ) -> Result<(), ReadToDataError> {
     let mut futures = FuturesUnordered::new();
@@ -999,7 +1003,7 @@ async fn handle_pipes_selection_state<'a>(
     selection_offers: &'a HashMap<ObjectId, Offer>,
     selection_type: SelectionType,
     selection_state: &'a mut SeatSelectionState,
-    size_limit: u64,
+    size_limit: Option<u64>,
     ignore_selection_event_on_error: bool,
 ) -> Result<MimeTypesWithData<'a>, &'a mut SeatSelectionState> {
     let SeatSelectionState::GotPipes { pipes, bytes_read } = selection_state else {

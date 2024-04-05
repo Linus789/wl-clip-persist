@@ -40,8 +40,8 @@ pub(crate) struct Settings {
     pub(crate) write_timeout: Duration,
     /// Whether selection events should be ignored when at least one error occurred.
     pub(crate) ignore_selection_event_on_error: bool,
-    /// The selection size limit in bytes.
-    pub(crate) selection_size_limit_bytes: u64,
+    /// The selection size limit in bytes, or [`None`] if no limit.
+    pub(crate) selection_size_limit_bytes: Option<u64>,
     /// If [`None`], the selection events should not be filtered by a [`Regex`].
     /// Otherwise, all mime types have to match the regex for it to be not ignored.
     pub(crate) all_mime_type_regex: Option<Regex>,
@@ -109,10 +109,7 @@ pub(crate) fn get_settings() -> Settings {
     let clipboard_type = *matches.get_one::<ClipboardType>("clipboard").unwrap();
     let write_timeout = Duration::from_millis(*matches.get_one::<u64>("write-timeout").unwrap());
     let ignore_selection_event_on_error = matches.get_flag("ignore-event-on-error");
-    let selection_size_limit_bytes = matches
-        .get_one::<u64>("selection-size-limit")
-        .copied()
-        .unwrap_or(u64::MAX);
+    let selection_size_limit_bytes = matches.get_one::<u64>("selection-size-limit").copied();
     let all_mime_type_regex = matches
         .get_one::<String>("all-mime-type-regex")
         .map(|s| match Regex::new(s) {
