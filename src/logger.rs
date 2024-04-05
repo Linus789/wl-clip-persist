@@ -4,16 +4,16 @@ use env_logger::Builder;
 use log::{Level, LevelFilter};
 
 pub(crate) fn init_logger() {
-    custom_logger_builder("%H:%M:%S.%3f")
+    custom_logger_builder("%H:%M:%S.%3f", true)
         .filter_level(LevelFilter::Info)
         .parse_default_env()
         .init()
 }
 
-fn custom_logger_builder(fmt: &'static str) -> Builder {
+fn custom_logger_builder(fmt: &'static str, with_timestamps: bool) -> Builder {
     let mut builder = Builder::new();
 
-    builder.format(|f, record| {
+    builder.format(move |f, record| {
         use std::io::Write as _;
 
         let target = record.target();
@@ -22,12 +22,14 @@ fn custom_logger_builder(fmt: &'static str) -> Builder {
             return Ok(());
         }
 
-        let time = Local::now().format(fmt);
+        let time = with_timestamps.then(|| Local::now().format(fmt));
         let level = record.level();
         let level_text = level_text(&level);
         let level_style = level_style(&level);
+        let display_target = target.strip_prefix(concat!(clap::crate_name!(), ' ')).unwrap_or("main");
+        let message = record.args().to_string().lines().collect::<Vec<_>>().join("\n  ");
 
-        if let Some(display_target) = target.strip_prefix(concat!(clap::crate_name!(), ' ')) {
+        if let Some(time) = time {
             writeln!(
                 f,
                 "{} {}{}{} {} > {}",
@@ -36,17 +38,17 @@ fn custom_logger_builder(fmt: &'static str) -> Builder {
                 level_text,
                 level_style.render_reset(),
                 display_target,
-                record.args()
+                message
             )
         } else {
             writeln!(
                 f,
-                "{} {}{}{} main > {}",
-                time,
+                "{}{}{} {} > {}",
                 level_style.render(),
                 level_text,
                 level_style.render_reset(),
-                record.args()
+                display_target,
+                message
             )
         }
     });
