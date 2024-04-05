@@ -420,9 +420,9 @@ fn data_control_offer_cb(
 
             log::trace!(
                 target: &log_seat_target(seat_name),
-                "New advertised mime type: offer {} has mime type: '{}'",
+                "New advertised mime type: offer {} has mime type: {:?}",
                 data_offer_id.as_u32(),
-                mime_type.to_string_lossy(),
+                mime_type,
             );
 
             offer.bytes_read += mime_type.as_bytes().len() as u64;
@@ -477,9 +477,9 @@ fn should_ignore_offer(settings: &Settings, seat_name: u32, selection_type: Sele
     for mime_type in &offer.mime_types {
         log::trace!(
             target: &log_seat_target(seat_name),
-            "Current {} selection event: offered mime types: '{}'",
+            "Current {} selection event: offered mime types: {:?}",
             selection_type.get_clipboard_type_str(false),
-            mime_type.to_string_lossy(),
+            mime_type,
         );
     }
 
@@ -487,32 +487,46 @@ fn should_ignore_offer(settings: &Settings, seat_name: u32, selection_type: Sele
         // Only keep this offer, if all mime types have a match for this regex.
         let match_all_regex = offer.mime_types.iter().all(|mime_type| {
             // TODO: Upstream issue: https://github.com/fancy-regex/fancy-regex/issues/84
-            let mime_type_lossy = mime_type.to_string_lossy();
+            match mime_type.to_str() {
+                Ok(mime_type_as_str) => {
+                    match regex.is_match(mime_type_as_str) {
+                        Ok(has_match) => {
+                            if !has_match {
+                                log::trace!(
+                                    target: &log_seat_target(seat_name),
+                                    "Ignoring {} selection event: mime type does not match the regex: {:?}",
+                                    selection_type.get_clipboard_type_str(false),
+                                    mime_type,
+                                );
+                            }
 
-            match regex.is_match(&mime_type_lossy) {
-                Ok(has_match) => {
-                    if !has_match {
-                        log::trace!(
-                            target: &log_seat_target(seat_name),
-                            "Ignoring {} selection event: mime type does not match the regex: '{}'",
-                            selection_type.get_clipboard_type_str(false),
-                            mime_type_lossy,
-                        );
+                            has_match
+                        }
+                        Err(err) => {
+                            log::debug!(
+                                target: &log_seat_target(seat_name),
+                                "Current {} selection event: regex returned an error for mime type {:?}: {}",
+                                selection_type.get_clipboard_type_str(false),
+                                mime_type,
+                                err,
+                            );
+
+                            // Just assume that the mime type has a match.
+                            true
+                        }
                     }
-
-                    has_match
                 }
                 Err(err) => {
                     log::debug!(
                         target: &log_seat_target(seat_name),
-                        "Current {} selection event: regex returned an error for mime type '{}': {}",
+                        "Current {} selection event: mime type {:?} contains invalid UTF-8: {}",
                         selection_type.get_clipboard_type_str(false),
-                        mime_type_lossy,
+                        mime_type,
                         err,
                     );
 
-                    // Just assume that the mime type has a match.
-                    true
+                    // Just assume that the mime type has no match.
+                    false
                 }
             }
         });
@@ -572,9 +586,9 @@ fn create_pipes_for_mime_types(
                 } else {
                     log::debug!(
                         target: &log_seat_target(seat_name),
-                        "Current {} selection event: ignoring mime type '{}': failed to create pipe: {}",
+                        "Current {} selection event: ignoring mime type {:?}: failed to create pipe: {}",
                         selection_type.get_clipboard_type_str(false),
-                        mime_type.to_string_lossy(),
+                        mime_type,
                         err
                     );
                     continue;
@@ -599,9 +613,9 @@ fn create_pipes_for_mime_types(
                 } else {
                     log::debug!(
                         target: &log_seat_target(seat_name),
-                        "Current {} selection event: ignoring mime type '{}': failed to get metadata for pipe: {}",
+                        "Current {} selection event: ignoring mime type {:?}: failed to get metadata for pipe: {}",
                         selection_type.get_clipboard_type_str(false),
-                        mime_type.to_string_lossy(),
+                        mime_type,
                         err
                     );
                     continue;
@@ -962,9 +976,9 @@ async fn handle_pipes_selection_state(
                 Some(Err(err)) => {
                     log::trace!(
                         target: &log_seat_target(seat_name),
-                        "Current {} selection event: ignoring mime type '{}': failed to read data: {}",
+                        "Current {} selection event: ignoring mime type {:?}: failed to read data: {}",
                         selection_type.get_clipboard_type_str(false),
-                        mime_type_and_pipe.mime_type.to_string_lossy(),
+                        mime_type_and_pipe.mime_type,
                         err,
                     );
                     None
@@ -1012,10 +1026,10 @@ fn data_source_cb(
         zwlr_data_control_source_v1::Event::Send(send) => {
             log::trace!(
                 target: &log_seat_target(seat_name),
-                "{} clipboard data source {}: received new request for mime type '{}'",
+                "{} clipboard data source {}: received new request for mime type {:?}",
                 selection_type.get_clipboard_type_str(true),
                 event_context.proxy.id().as_u32(),
-                send.mime_type.to_string_lossy(),
+                send.mime_type,
             );
 
             // Check if the file descriptor comes from our own app
@@ -1034,10 +1048,10 @@ fn data_source_cb(
                 Err(err) => {
                     log::debug!(
                         target: &log_seat_target(seat_name),
-                        "{} clipboard data source {}: could not get file metadata for mime type '{}': {}",
+                        "{} clipboard data source {}: could not get file metadata for mime type {:?}: {}",
                         selection_type.get_clipboard_type_str(true),
                         event_context.proxy.id().as_u32(),
-                        send.mime_type.to_string_lossy(),
+                        send.mime_type,
                         err
                     );
                     drop(fd_file); // Explicitly close file descriptor
@@ -1069,10 +1083,10 @@ fn data_source_cb(
                 // Mime type not available, so return
                 log::trace!(
                     target: &log_seat_target(seat_name),
-                    "{} clipboard data source {}: mime type '{}' is not available",
+                    "{} clipboard data source {}: mime type {:?} is not available",
                     selection_type.get_clipboard_type_str(true),
                     event_context.proxy.id().as_u32(),
-                    mime_type_boxed.to_string_lossy(),
+                    mime_type_boxed,
                 );
                 drop(fd_file); // Explicitly close file descriptor
                 return;
@@ -1131,20 +1145,20 @@ fn data_source_cb(
                             TimeoutResult::IoError(err) => {
                                 log::debug!(
                                     target: &log_seat_target(seat_name),
-                                    "{} clipboard data source {}: failed to flush clipboard data for mime type '{}': {}",
+                                    "{} clipboard data source {}: failed to flush clipboard data for mime type {:?}: {}",
                                     selection_type.get_clipboard_type_str(true),
                                     event_context.proxy.id().as_u32(),
-                                    mime_type_boxed.to_string_lossy(),
+                                    mime_type_boxed,
                                     err,
                                 );
                             }
                             TimeoutResult::Timeout => {
                                 log::debug!(
                                     target: &log_seat_target(seat_name),
-                                    "{} clipboard data source {}: failed to flush clipboard data for mime type '{}': timed out",
+                                    "{} clipboard data source {}: failed to flush clipboard data for mime type {:?}: timed out",
                                     selection_type.get_clipboard_type_str(true),
                                     event_context.proxy.id().as_u32(),
-                                    mime_type_boxed.to_string_lossy(),
+                                    mime_type_boxed,
                                 );
                             }
                         }
@@ -1152,20 +1166,20 @@ fn data_source_cb(
                     TimeoutResult::IoError(err) => {
                         log::debug!(
                             target: &log_seat_target(seat_name),
-                            "{} clipboard data source {}: failed to write clipboard data for mime type '{}': {}",
+                            "{} clipboard data source {}: failed to write clipboard data for mime type {:?}: {}",
                             selection_type.get_clipboard_type_str(true),
                             event_context.proxy.id().as_u32(),
-                            mime_type_boxed.to_string_lossy(),
+                            mime_type_boxed,
                             err,
                         );
                     }
                     TimeoutResult::Timeout => {
                         log::debug!(
                             target: &log_seat_target(seat_name),
-                            "{} clipboard data source {}: failed to write clipboard data for mime type '{}': timed out",
+                            "{} clipboard data source {}: failed to write clipboard data for mime type {:?}: timed out",
                             selection_type.get_clipboard_type_str(true),
                             event_context.proxy.id().as_u32(),
-                            mime_type_boxed.to_string_lossy(),
+                            mime_type_boxed,
                         );
                     }
                 }
