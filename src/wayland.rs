@@ -71,7 +71,7 @@ pub(crate) async fn run(settings: Settings, is_reconnect: bool) -> Result<Infall
                         target: &log_seat_target(seat_global.name),
                         "Failed to bind seat: {}",
                         err,
-                    )
+                    );
                 })
                 .ok()
                 .map(|seat| (seat_global.name, seat))
@@ -187,17 +187,26 @@ pub(crate) async fn run(settings: Settings, is_reconnect: bool) -> Result<Infall
 fn wl_registry_cb(connection: &mut Connection<State>, state: &mut State, event: &wl_registry::Event) {
     match event {
         wl_registry::Event::Global(global) if global.is::<WlSeat>() => {
-            if let Ok(seat) = Seat::bind(connection, state.data_control_manager, global, &state.settings) {
-                if let Some(old_seat) = state.seats.insert(global.name, seat) {
-                    old_seat.destroy(connection);
-                    log::error!(
+            match Seat::bind(connection, state.data_control_manager, global, &state.settings) {
+                Ok(seat) => {
+                    if let Some(old_seat) = state.seats.insert(global.name, seat) {
+                        old_seat.destroy(connection);
+                        log::error!(
+                            target: &log_seat_target(global.name),
+                            "Added seat, even though seat with same id was already present"
+                        );
+                    } else {
+                        log::trace!(
+                            target: &log_seat_target(global.name),
+                            "Added seat"
+                        );
+                    }
+                }
+                Err(err) => {
+                    log::debug!(
                         target: &log_seat_target(global.name),
-                        "Added seat, even though seat with same id was already present"
-                    );
-                } else {
-                    log::trace!(
-                        target: &log_seat_target(global.name),
-                        "Added seat"
+                        "Failed to bind seat: {}",
+                        err,
                     );
                 }
             }
