@@ -202,6 +202,9 @@ fn wl_registry_cb(connection: &mut Connection<State>, state: &mut State, event: 
                 }
             }
         }
+        wl_registry::Event::Global(_) => {
+            // Ignore all other globals that are advertised, like WlOutput
+        }
         wl_registry::Event::GlobalRemove(name) => {
             if let Some(seat) = state.seats.remove(name) {
                 seat.destroy(connection);
