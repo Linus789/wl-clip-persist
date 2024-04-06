@@ -109,6 +109,13 @@ wl-clip-persist --clipboard regular --all-mime-type-regex '(?i)^(?!image/x-inksc
 It is perfectly possible to use a clipboard history application alongside wl-clip-persist.
 For example [cliphist](https://github.com/sentriz/cliphist) will work.
 
+### Is it possible to ignore clipboard events from password managers?
+Depends. If the password manager advertises the selection event with the additional MIME type `x-kde-passwordManagerHint`,
+like for example KeePassXC does, then we can ignore the selection event via:
+```
+wl-clip-persist --clipboard regular --all-mime-type-regex '^(?!x-kde-passwordManagerHint).+'
+```
+
 ## Build from source
 * Install `rustup` to get the `rust` compiler installed on your system. [Install rustup](https://www.rust-lang.org/en-US/install.html)
 * Rust version 1.76.0 or later is required
