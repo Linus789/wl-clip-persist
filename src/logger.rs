@@ -4,7 +4,7 @@ use env_logger::Builder;
 use log::{Level, LevelFilter};
 
 pub(crate) fn init_logger(with_timestamps: bool) {
-    custom_logger_builder("%H:%M:%S.%3f", with_timestamps)
+    custom_logger_builder("%Y-%m-%dT%H:%M:%S.%3f", with_timestamps)
         .filter_level(LevelFilter::Info)
         .parse_default_env()
         .init()
