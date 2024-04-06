@@ -80,6 +80,12 @@ wl-clip-persist --clipboard regular --selection-size-limit 1048576
 
 This option can be used to limit the memory usage.
 
+### Disable timestamps
+*Default: not disabled*
+
+With `--disable-timestamps`, the timestamps in the log messages are disabled.
+This might be useful for systemd services or similar, which provide their own timestamps.
+
 ### Logging
 You can modify the log level to see more of what is going on, e.g.
 ```
