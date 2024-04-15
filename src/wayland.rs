@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::ffi::CStr;
 use std::fs::File;
+use std::num::NonZeroU64;
 use std::ops::Deref;
 use std::os::fd::IntoRawFd;
 use std::os::unix::io::FromRawFd;
@@ -465,7 +466,7 @@ fn data_control_offer_cb(
             offer.bytes_read += mime_type.as_bytes().len() as u64;
 
             if let Some(selection_size_limit_bytes) = event_context.state.settings.selection_size_limit_bytes {
-                if offer.bytes_read > selection_size_limit_bytes {
+                if offer.bytes_read > selection_size_limit_bytes.get() {
                     log::trace!(
                         target: &log_seat_target(seat_name),
                         "New advertised mime type: exceeded specified selection size limit",
@@ -856,7 +857,7 @@ async fn handle_new_selection_state(connection: &mut Connection<State>, state: &
 async fn read_pipe_to_data<'a>(
     mime_type_and_pipe: &'a mut MimeTypeAndPipe,
     bytes_read: Rc<RefCell<&mut u64>>,
-    size_limit: Option<u64>,
+    size_limit: Option<NonZeroU64>,
 ) -> PipeDataResult<'a> {
     if mime_type_and_pipe.data_read.is_none() {
         mime_type_and_pipe.data_read = Some(Ok(Vec::with_capacity(32)));
@@ -875,7 +876,7 @@ async fn read_pipe_to_data<'a>(
                 **bytes_read.borrow_mut() += size as u64;
 
                 if let Some(size_limit) = size_limit {
-                    if **bytes_read.borrow() > size_limit {
+                    if **bytes_read.borrow() > size_limit.get() {
                         mime_type_and_pipe.read_finished = true;
 
                         return PipeDataResult {
@@ -932,7 +933,7 @@ async fn read_pipe_to_data<'a>(
 async fn read_pipes_to_data(
     pipes: &mut [MimeTypeAndPipe],
     bytes_read: &mut u64,
-    size_limit: Option<u64>,
+    size_limit: Option<NonZeroU64>,
     ignore_selection_event_on_error: bool,
 ) -> Result<(), ReadToDataError> {
     let mut futures = FuturesUnordered::new();
@@ -1003,7 +1004,7 @@ async fn handle_pipes_selection_state<'a>(
     selection_offers: &'a HashMap<ObjectId, Offer>,
     selection_type: SelectionType,
     selection_state: &'a mut SeatSelectionState,
-    size_limit: Option<u64>,
+    size_limit: Option<NonZeroU64>,
     ignore_selection_event_on_error: bool,
 ) -> Result<MimeTypesWithData<'a>, &'a mut SeatSelectionState> {
     let SeatSelectionState::GotPipes { pipes, bytes_read } = selection_state else {
