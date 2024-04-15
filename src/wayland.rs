@@ -702,9 +702,7 @@ async fn handle_new_selection_state(connection: &mut Connection<State>, state: &
             .iter_mut()
             .flat_map(|(seat_name, seat)| std::iter::repeat(seat_name).zip(seat.selections_iter_mut()))
             .filter_map(|(seat_name, (selection_type, selection_state))| {
-                let Some(selection_state) = selection_state else {
-                    return None;
-                };
+                let selection_state = selection_state?;
 
                 match selection_state {
                     SeatSelectionState::WaitingForNewOffers => None,
