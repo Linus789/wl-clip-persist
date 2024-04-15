@@ -46,6 +46,11 @@ pub(crate) struct Settings {
     /// If [`None`], the selection events should not be filtered by a [`Regex`].
     /// Otherwise, all mime types have to match the regex for it to be not ignored.
     pub(crate) all_mime_type_regex: Option<Regex>,
+    /// The number of times a reconnect to the Wayland server should be tried after an error,
+    /// or [`None`] if no limit.
+    pub(crate) reconnect_tries: Option<u64>,
+    /// The delay between two reconnect tries to the Wayland server.
+    pub(crate) reconnect_delay: Duration,
 }
 
 /// Get the settings for the program.
@@ -96,6 +101,21 @@ pub(crate) fn get_settings() -> Settings {
         )
         .arg(
             arg!(
+                --"reconnect-tries" <NUMBER> "Limit the number of tries to reconnect to the Wayland server after a Wayland error"
+            )
+            .required(false)
+            .value_parser(clap::value_parser!(u64)),
+        )
+        .arg(
+            arg!(
+                --"reconnect-delay" <MILLISECONDS> "The delay between reconnect tries to the Wayland server"
+            )
+            .required(false)
+            .value_parser(clap::value_parser!(u64).range(0..=i32::MAX as u64))
+            .default_value("100"),
+        )
+        .arg(
+            arg!(
                 --"disable-timestamps" "Do not show timestamps in the log messages"
             )
             .required(false)
@@ -124,6 +144,8 @@ pub(crate) fn get_settings() -> Settings {
                 std::process::exit(1);
             }
         });
+    let reconnect_tries = matches.get_one::<u64>("reconnect-tries").copied();
+    let reconnect_delay = Duration::from_millis(*matches.get_one::<u64>("reconnect-delay").unwrap());
 
     Settings {
         clipboard_type,
@@ -131,5 +153,7 @@ pub(crate) fn get_settings() -> Settings {
         ignore_selection_event_on_error,
         selection_size_limit_bytes,
         all_mime_type_regex,
+        reconnect_tries,
+        reconnect_delay,
     }
 }

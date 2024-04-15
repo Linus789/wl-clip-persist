@@ -32,7 +32,7 @@ since the primary clipboard seems to have unintended side effects for some appli
 
 ## Optional arguments
 ### Write timeout
-*Default write timeout: 3000 ms*
+*Default: 3000 ms*
 
 It is possible to change the write timeout.
 In this example, the write timeout is reduced to 1000 ms.
@@ -79,6 +79,20 @@ wl-clip-persist --clipboard regular --selection-size-limit 1048576
 ```
 
 This option can be used to limit the memory usage.
+
+### Reconnect tries
+*Default: no limit*
+
+With `--reconnect-tries`, the number of tries to reconnect to the Wayland server after a Wayland error occurred will be limited.
+
+This option only applies if a Wayland error occurred after at least one successful connection to the Wayland server has been established. If the first connection to the Wayland server on startup fails, the application will exit with exit code 1.
+
+### Reconnect delay
+*Default: 100 ms*
+
+With `--reconnect-delay`, the delay between reconnect tries to the Wayland server is adjusted.
+
+After a Wayland error occurred, a reconnect will be tried immediately. If the reconnect failed, the delay is applied before another reconnect is tried.
 
 ### Disable timestamps
 *Default: not disabled*

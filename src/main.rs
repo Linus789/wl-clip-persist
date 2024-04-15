@@ -1,6 +1,6 @@
-pub(crate) mod logger;
-pub(crate) mod settings;
-pub(crate) mod states;
+mod logger;
+mod settings;
+mod states;
 mod wayland;
 
 use std::time::Duration;
@@ -8,9 +8,6 @@ use std::time::Duration;
 use crate::logger::log_default_target;
 use crate::settings::get_settings;
 use crate::states::WaylandError;
-
-const RECONNECT_TRIES: u8 = 30;
-const RECONNECT_TIMEOUT: Duration = Duration::from_millis(100);
 
 // One worker thread for writing the clipboard data
 #[tokio::main(flavor = "multi_thread", worker_threads = 1)]
@@ -24,25 +21,59 @@ async fn main() {
             Ok(_) => unreachable!(),
             Err(WaylandError::ConnectError(err)) => {
                 if is_reconnect {
-                    connection_tries += 1;
+                    if settings.reconnect_tries.is_some() {
+                        connection_tries += 1;
+                    }
 
-                    if connection_tries == RECONNECT_TRIES {
+                    if Some(connection_tries) == settings.reconnect_tries {
                         log::error!(
                             target: log_default_target(),
                             "Wayland connect error: {}",
                             err,
                         );
                         std::process::exit(1);
+                    } else if settings.reconnect_delay == Duration::ZERO {
+                        match settings.reconnect_tries {
+                            Some(reconnect_tries) => {
+                                log::error!(
+                                    target: log_default_target(),
+                                    "Wayland connect error: {}\nAttempt {}/{} to reconnect will start immediately...",
+                                    err,
+                                    connection_tries + 1,
+                                    reconnect_tries,
+                                );
+                            }
+                            None => {
+                                log::error!(
+                                    target: log_default_target(),
+                                    "Wayland connect error: {}\nAttempt to reconnect will start immediately...",
+                                    err,
+                                );
+                            }
+                        }
                     } else {
-                        log::error!(
-                            target: log_default_target(),
-                            "Wayland connect error: {}\nAttempt {}/{} to reconnect in {} ms...",
-                            err,
-                            connection_tries + 1,
-                            RECONNECT_TRIES,
-                            RECONNECT_TIMEOUT.as_millis()
-                        );
-                        tokio::time::sleep(RECONNECT_TIMEOUT).await;
+                        match settings.reconnect_tries {
+                            Some(reconnect_tries) => {
+                                log::error!(
+                                    target: log_default_target(),
+                                    "Wayland connect error: {}\nAttempt {}/{} to reconnect in {} ms...",
+                                    err,
+                                    connection_tries + 1,
+                                    reconnect_tries,
+                                    settings.reconnect_delay.as_millis().max(1)
+                                );
+                            }
+                            None => {
+                                log::error!(
+                                    target: log_default_target(),
+                                    "Wayland connect error: {}\nAttempt to reconnect in {} ms...",
+                                    err,
+                                    settings.reconnect_delay.as_millis().max(1)
+                                );
+                            }
+                        }
+
+                        tokio::time::sleep(settings.reconnect_delay).await;
                     }
                 } else {
                     log::error!(
@@ -54,17 +85,28 @@ async fn main() {
                 }
             }
             Err(WaylandError::IoError(err)) => {
-                if RECONNECT_TRIES > 0 {
+                if settings.reconnect_tries.map(|tries| tries > 0).unwrap_or(true) {
                     is_reconnect = true;
                     connection_tries = 0;
 
-                    log::error!(
-                        target: log_default_target(),
-                        "Wayland IO error: {}\nAttempt {}/{} to reconnect will start immediately...",
-                        err,
-                        connection_tries + 1,
-                        RECONNECT_TRIES,
-                    );
+                    match settings.reconnect_tries {
+                        Some(reconnect_tries) => {
+                            log::error!(
+                                target: log_default_target(),
+                                "Wayland IO error: {}\nAttempt {}/{} to reconnect will start immediately...",
+                                err,
+                                connection_tries + 1,
+                                reconnect_tries,
+                            );
+                        }
+                        None => {
+                            log::error!(
+                                target: log_default_target(),
+                                "Wayland IO error: {}\nAttempt to reconnect will start immediately...",
+                                err,
+                            );
+                        }
+                    }
                 } else {
                     log::error!(
                         target: log_default_target(),
