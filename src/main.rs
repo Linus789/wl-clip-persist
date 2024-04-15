@@ -54,16 +54,25 @@ async fn main() {
                 }
             }
             Err(WaylandError::IoError(err)) => {
-                is_reconnect = true;
-                connection_tries = 0;
+                if RECONNECT_TRIES > 0 {
+                    is_reconnect = true;
+                    connection_tries = 0;
 
-                log::error!(
-                    target: log_default_target(),
-                    "Wayland IO error: {}\nAttempt {}/{} to reconnect will start immediately...",
-                    err,
-                    connection_tries + 1,
-                    RECONNECT_TRIES,
-                );
+                    log::error!(
+                        target: log_default_target(),
+                        "Wayland IO error: {}\nAttempt {}/{} to reconnect will start immediately...",
+                        err,
+                        connection_tries + 1,
+                        RECONNECT_TRIES,
+                    );
+                } else {
+                    log::error!(
+                        target: log_default_target(),
+                        "Wayland IO error: {}",
+                        err,
+                    );
+                    std::process::exit(1);
+                }
             }
         }
     }

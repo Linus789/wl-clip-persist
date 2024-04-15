@@ -451,10 +451,6 @@ fn data_control_offer_cb(
                 return;
             };
 
-            if offer.bytes_exceeded_limit {
-                return;
-            }
-
             log::trace!(
                 target: &log_seat_target(seat_name),
                 "New advertised mime type: offer {} has mime type: {:?}",
@@ -462,13 +458,17 @@ fn data_control_offer_cb(
                 mime_type,
             );
 
+            if offer.bytes_exceeded_limit {
+                return;
+            }
+
             offer.bytes_read += mime_type.as_bytes().len() as u64;
 
             if let Some(selection_size_limit_bytes) = event_context.state.settings.selection_size_limit_bytes {
                 if offer.bytes_read > selection_size_limit_bytes {
                     log::trace!(
                         target: &log_seat_target(seat_name),
-                        "New advertised mime type: exceeded selection size limit",
+                        "New advertised mime type: exceeded specified selection size limit",
                     );
                     offer.bytes_exceeded_limit = true;
                     return;
@@ -497,7 +497,7 @@ fn should_ignore_offer(settings: &Settings, seat_name: u32, selection_type: Sele
     if offer.bytes_exceeded_limit {
         log::trace!(
             target: &log_seat_target(seat_name),
-            "Ignoring {} selection event: mime types exceeded specified size limit",
+            "Ignoring {} selection event: mime types exceeded specified selection size limit",
             selection_type.get_clipboard_type_str(false),
         );
         return true;
@@ -1016,7 +1016,7 @@ async fn handle_pipes_selection_state<'a>(
             .into_iter()
             .filter_map(|mime_type_and_pipe| match mime_type_and_pipe.data_read {
                 Some(Ok(data)) => Some((mime_type_and_pipe.mime_type, data.into_boxed_slice())),
-                Some(Err(err)) => {
+                Some(Err(ReadToDataError::IoError(err))) => {
                     log::trace!(
                         target: &log_seat_target(seat_name),
                         "Current {} selection event: ignoring mime type {:?}: failed to read data: {}",
@@ -1026,16 +1026,32 @@ async fn handle_pipes_selection_state<'a>(
                     );
                     None
                 }
+                Some(Err(ReadToDataError::SizeLimitExceeded)) => {
+                    // Impossible, because a SizeLimitExceeded error is returned immediately
+                    unreachable!()
+                }
                 None => unreachable!(),
             })
             .collect::<HashMap<_, _>>(),
         Err(err) => {
-            log::trace!(
-                target: &log_seat_target(seat_name),
-                "Ignoring {} selection event: failed to read data: {}",
-                selection_type.get_clipboard_type_str(false),
-                err
-            );
+            match err {
+                ReadToDataError::IoError(err) => {
+                    log::trace!(
+                        target: &log_seat_target(seat_name),
+                        "Ignoring {} selection event: failed to read data: {}",
+                        selection_type.get_clipboard_type_str(false),
+                        err
+                    );
+                }
+                ReadToDataError::SizeLimitExceeded => {
+                    log::trace!(
+                        target: &log_seat_target(seat_name),
+                        "Ignoring {} selection event: offer exceeded specified selection size limit",
+                        selection_type.get_clipboard_type_str(false)
+                    );
+                }
+            }
+
             return Err(selection_state);
         }
     };
@@ -1252,7 +1268,7 @@ fn data_source_cb(
     }
 }
 
-// Sets the clipboard for a specific seat and selection type.
+/// Sets the clipboard for a specific seat and selection type.
 fn set_clipboard(
     connection: &mut Connection<State>,
     data_control_manager: ZwlrDataControlManagerV1,

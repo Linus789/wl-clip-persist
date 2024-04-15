@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::ffi::CStr;
-use std::fmt::Display;
 use std::fs::File;
 use std::os::unix::fs::MetadataExt;
 
@@ -85,14 +84,8 @@ impl Seat {
             wl_seat: seat,
             data_control_device,
             selection_offers: HashMap::with_capacity(2),
-            regular_selection: settings
-                .clipboard_type
-                .regular()
-                .then_some(SeatSelectionState::default()),
-            primary_selection: settings
-                .clipboard_type
-                .primary()
-                .then_some(SeatSelectionState::default()),
+            regular_selection: settings.clipboard_type.regular().then(SeatSelectionState::default),
+            primary_selection: settings.clipboard_type.primary().then(SeatSelectionState::default),
             got_new_regular_selection: false,
             got_new_primary_selection: false,
         })
@@ -199,15 +192,6 @@ pub(crate) struct MimeTypesWithData<'a> {
     pub(crate) selection_state: &'a mut SeatSelectionState,
     pub(crate) selection_type: SelectionType,
     pub(crate) data: HashMap<Box<CStr>, Box<[u8]>>,
-}
-
-impl Display for ReadToDataError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ReadToDataError::IoError(err) => write!(f, "error while reading from file descriptor: {}", err),
-            ReadToDataError::SizeLimitExceeded => write!(f, "offer exceeded specified size limit"),
-        }
-    }
 }
 
 /// Describes the current state of handling the selection event.
