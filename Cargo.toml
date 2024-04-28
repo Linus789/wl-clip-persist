@@ -21,6 +21,7 @@ futures-util = { version = "0.3", default-features = false, features = ["alloc"]
 wayrs-client = { version = "1.0", features = ["tokio"] }
 wayrs-protocols = { version = "0.13", features = ["wlr-data-control-unstable-v1"] }
 fancy-regex = "0.13"
+libc = "0.2"
 
 [profile.release]
 lto = true

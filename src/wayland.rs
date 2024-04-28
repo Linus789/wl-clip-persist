@@ -5,7 +5,7 @@ use std::ffi::CStr;
 use std::fs::File;
 use std::num::NonZeroU64;
 use std::ops::Deref;
-use std::os::fd::IntoRawFd;
+use std::os::fd::{IntoRawFd, OwnedFd};
 use std::os::unix::io::FromRawFd;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -20,6 +20,7 @@ use wayrs_client::proxy::Proxy;
 use wayrs_client::{Connection, EventCtx};
 use wayrs_protocols::wlr_data_control_unstable_v1::*;
 
+use crate::async_io::FdWrite;
 use crate::logger::{log_default_target, log_seat_target};
 use crate::settings::Settings;
 use crate::states::*;
@@ -1154,7 +1155,19 @@ fn data_source_cb(
             // Write the data to the file descriptor in a worker thread,
             // so we do not block the main thread.
             let data_map_clone = Arc::clone(data_map);
-            let mut tokio_file = tokio::fs::File::from_std(fd_file);
+            let mut write_handle = match FdWrite::try_from(OwnedFd::from(fd_file)) {
+                Ok(write_handle) => write_handle,
+                Err(err) => {
+                    log::warn!(
+                        target: &log_seat_target(seat_name),
+                        "{} clipboard data source {}: failed to create write handle: {}",
+                        selection_type.get_clipboard_type_str(true),
+                        event_context.proxy.id().as_u32(),
+                        err,
+                    );
+                    return;
+                }
+            };
             let write_timeout = event_context.state.settings.write_timeout;
 
             tokio::spawn(async move {
@@ -1166,64 +1179,29 @@ fn data_source_cb(
                     Timeout,
                 }
 
-                let deadline = tokio::time::Instant::now() + write_timeout;
                 let write_result = tokio::select! {
                     biased;
 
-                    res = tokio_file.write_all(data) => {
+                    res = write_handle.write_all(data) => {
                         match res {
                             Ok(()) => TimeoutResult::Ok,
                             Err(err) => TimeoutResult::IoError(err),
                         }
                     }
-                    _ = tokio::time::sleep_until(deadline) => {
+                    _ = tokio::time::sleep(write_timeout) => {
                         TimeoutResult::Timeout
                     }
                 };
 
+                drop(write_handle); // Explicitly close file descriptor
                 drop(data_map_clone);
 
                 match write_result {
                     TimeoutResult::Ok => {
-                        let flush_result = tokio::select! {
-                            biased;
-
-                            res = tokio_file.flush() => {
-                                match res {
-                                    Ok(()) => TimeoutResult::Ok,
-                                    Err(err) => TimeoutResult::IoError(err),
-                                }
-                            }
-                            _ = tokio::time::sleep_until(deadline) => {
-                                TimeoutResult::Timeout
-                            }
-                        };
-
-                        match flush_result {
-                            TimeoutResult::Ok => {}
-                            TimeoutResult::IoError(err) => {
-                                log::debug!(
-                                    target: &log_seat_target(seat_name),
-                                    "{} clipboard data source {}: failed to flush clipboard data for mime type {:?}: {}",
-                                    selection_type.get_clipboard_type_str(true),
-                                    event_context.proxy.id().as_u32(),
-                                    mime_type_boxed,
-                                    err,
-                                );
-                            }
-                            TimeoutResult::Timeout => {
-                                log::debug!(
-                                    target: &log_seat_target(seat_name),
-                                    "{} clipboard data source {}: failed to flush clipboard data for mime type {:?}: timed out",
-                                    selection_type.get_clipboard_type_str(true),
-                                    event_context.proxy.id().as_u32(),
-                                    mime_type_boxed,
-                                );
-                            }
-                        }
+                        // Since FdWrite uses libc::write directly, there is no need for flushing
                     }
                     TimeoutResult::IoError(err) => {
-                        log::debug!(
+                        log::warn!(
                             target: &log_seat_target(seat_name),
                             "{} clipboard data source {}: failed to write clipboard data for mime type {:?}: {}",
                             selection_type.get_clipboard_type_str(true),
@@ -1242,9 +1220,6 @@ fn data_source_cb(
                         );
                     }
                 }
-
-                // Explicitly close file descriptor
-                drop(tokio_file);
             });
         }
         zwlr_data_control_source_v1::Event::Cancelled => {
