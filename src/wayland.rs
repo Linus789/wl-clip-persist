@@ -1179,16 +1179,14 @@ fn data_source_cb(
                 }
             }
 
-            let mime_type_boxed = send.mime_type.into_boxed_c_str();
-
-            if !data_map.contains_key(&mime_type_boxed) {
+            if !data_map.contains_key(send.mime_type.as_c_str()) {
                 // Mime type not available, so return
                 log::trace!(
                     target: &log_seat_target(seat_name),
                     "{} clipboard data source {}: mime type {:?} is not available",
                     selection_type.get_clipboard_type_str(true),
                     event_context.proxy.id().as_u32(),
-                    mime_type_boxed,
+                    send.mime_type,
                 );
                 drop(fd_file); // Explicitly close file descriptor
                 return;
@@ -1213,7 +1211,7 @@ fn data_source_cb(
             let write_timeout = event_context.state.settings.write_timeout;
 
             tokio::spawn(async move {
-                let data = data_map_clone.get(&mime_type_boxed).unwrap().deref();
+                let data = data_map_clone.get(send.mime_type.as_c_str()).unwrap().deref();
 
                 enum TimeoutResult {
                     Ok,
@@ -1248,7 +1246,7 @@ fn data_source_cb(
                             "{} clipboard data source {}: failed to write clipboard data for mime type {:?}: {}",
                             selection_type.get_clipboard_type_str(true),
                             event_context.proxy.id().as_u32(),
-                            mime_type_boxed,
+                            send.mime_type,
                             err,
                         );
                     }
@@ -1258,7 +1256,7 @@ fn data_source_cb(
                             "{} clipboard data source {}: failed to write clipboard data for mime type {:?}: timed out",
                             selection_type.get_clipboard_type_str(true),
                             event_context.proxy.id().as_u32(),
-                            mime_type_boxed,
+                            send.mime_type,
                         );
                     }
                 }
