@@ -10,10 +10,10 @@ use tokio::io::AsyncWrite;
 
 const MAX_LEN: usize = <libc::ssize_t>::MAX as _;
 
-fn set_nonblocking(fd: RawFd) -> Result<(), std::io::Error> {
+fn set_non_blocking(fd: RawFd) -> Result<(), std::io::Error> {
     let fd_flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
 
-    if fd_flags < 0 {
+    if fd_flags == -1 {
         return Err(std::io::Error::last_os_error());
     }
 
@@ -34,7 +34,7 @@ impl TryFrom<OwnedFd> for FdWrite {
     type Error = std::io::Error;
 
     fn try_from(fd: OwnedFd) -> Result<Self, Self::Error> {
-        set_nonblocking(fd.as_raw_fd())?;
+        set_non_blocking(fd.as_raw_fd())?;
         Ok(Self(AsyncFd::new(fd)?))
     }
 }
@@ -50,7 +50,7 @@ impl FdWrite {
                 Err(err) => return Poll::Ready(Err(err)),
             };
 
-            let write_result = unsafe { libc::write(fd, buf.as_ptr() as _, std::cmp::min(buf.len(), MAX_LEN)) };
+            let write_result = unsafe { libc::write(fd, buf.as_ptr().cast(), std::cmp::min(buf.len(), MAX_LEN)) };
 
             if write_result == -1 {
                 match std::io::Error::last_os_error() {
