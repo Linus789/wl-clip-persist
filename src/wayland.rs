@@ -1143,7 +1143,7 @@ fn data_source_cb(
                     SelectionType::Primary => seat.primary_selection.as_mut(),
                 });
 
-            let fd_file = unsafe { File::from_raw_fd(send.fd.into_raw_fd()) };
+            let fd_file = File::from(send.fd);
             let fd_identifier = match FdIdentifier::try_from(&fd_file) {
                 Ok(fd_identifier) => fd_identifier,
                 Err(err) => {
