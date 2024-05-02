@@ -1296,7 +1296,11 @@ fn set_clipboard(
 ) {
     let source = data_control_manager.create_data_source(connection);
     for mime_type in ordered_mime_types {
-        source.offer(connection, mime_type.deref().clone().into_c_string());
+        // Some mime types might have gotten ignored due to errors.
+        // Only offer the mime types for which we have the data.
+        if data.contains_key(&mime_type) {
+            source.offer(connection, mime_type.deref().clone().into_c_string());
+        }
     }
 
     let mut boxed_data = HashMap::with_capacity(data.len());
