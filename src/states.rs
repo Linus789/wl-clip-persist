@@ -1,7 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::CStr;
 use std::fs::File;
 use std::os::unix::fs::MetadataExt;
+use std::rc::Rc;
 
 use wayrs_client::global::{BindError, Global, GlobalExt as _};
 use wayrs_client::object::ObjectId;
@@ -148,7 +149,8 @@ impl Seat {
 #[derive(Debug)]
 pub(crate) struct Offer {
     pub(crate) data_control_offer: ZwlrDataControlOfferV1,
-    pub(crate) mime_types: Vec<std::ffi::CString>,
+    pub(crate) ordered_mime_types: Vec<Rc<Box<CStr>>>,
+    pub(crate) unique_mime_types: HashSet<Rc<Box<CStr>>>,
     pub(crate) bytes_read: u64,
     pub(crate) bytes_exceeded_limit: bool,
 }
@@ -157,7 +159,8 @@ impl From<ZwlrDataControlOfferV1> for Offer {
     fn from(data_control_offer: ZwlrDataControlOfferV1) -> Self {
         Self {
             data_control_offer,
-            mime_types: Vec::with_capacity(32),
+            ordered_mime_types: Vec::with_capacity(32),
+            unique_mime_types: HashSet::with_capacity(32),
             bytes_read: 0,
             bytes_exceeded_limit: false,
         }
@@ -166,7 +169,7 @@ impl From<ZwlrDataControlOfferV1> for Offer {
 
 #[derive(Debug)]
 pub(crate) struct MimeTypeAndPipe {
-    pub(crate) mime_type: Box<CStr>,
+    pub(crate) mime_type: Rc<Box<CStr>>,
     pub(crate) pipe: tokio_pipe::PipeRead,
     pub(crate) data_read: Option<Result<Vec<u8>, ReadToDataError>>,
     pub(crate) read_finished: bool,
@@ -191,7 +194,8 @@ pub(crate) struct MimeTypesWithData<'a> {
     pub(crate) selection_offers: &'a HashMap<ObjectId, Offer>,
     pub(crate) selection_state: &'a mut SeatSelectionState,
     pub(crate) selection_type: SelectionType,
-    pub(crate) data: HashMap<Box<CStr>, Box<[u8]>>,
+    pub(crate) ordered_mime_types: Vec<Rc<Box<CStr>>>,
+    pub(crate) data: HashMap<Rc<Box<CStr>>, Box<[u8]>>,
 }
 
 /// Describes the current state of handling the selection event.
@@ -203,13 +207,15 @@ pub(crate) enum SeatSelectionState {
     /// We read the mime types of the offer.
     ReadMimes {
         data_control_offer: ZwlrDataControlOfferV1,
-        mime_types: Vec<std::ffi::CString>,
+        ordered_mime_types: Vec<Rc<Box<CStr>>>,
+        unique_mime_types: HashSet<Rc<Box<CStr>>>,
         bytes_read: u64,
         fd_from_own_app: HashMap<FdIdentifier, bool>,
     },
     /// We got the pipes for the current offer.
     /// The pipes are not from ourselves.
     GotPipes {
+        ordered_mime_types: Vec<Rc<Box<CStr>>>,
         pipes: Vec<MimeTypeAndPipe>,
         bytes_read: u64,
     },
@@ -222,7 +228,10 @@ pub(crate) enum SeatSelectionState {
     /// 3. While we wait for that info, the pipes have been fully read, and we set the data as the new clipboard
     ///    => By doing that, we overwrite the new offer if it is from the same selection type
     ///    => Therefore, if there is an offer whose selection type is unknown, we should wait before setting the clipboard
-    GotData { data: HashMap<Box<CStr>, Box<[u8]>> },
+    GotData {
+        ordered_mime_types: Vec<Rc<Box<CStr>>>,
+        data: HashMap<Rc<Box<CStr>>, Box<[u8]>>,
+    },
     /// The selection was cleared.
     GotClear,
     /// The selection was updated, but we will not save the data in memory.
@@ -243,7 +252,8 @@ impl SeatSelectionState {
         &mut self,
         conn: &mut Connection<State>,
         data_control_offer: ZwlrDataControlOfferV1,
-        mime_types: Vec<std::ffi::CString>,
+        ordered_mime_types: Vec<Rc<Box<CStr>>>,
+        unique_mime_types: HashSet<Rc<Box<CStr>>>,
         bytes_read: u64,
     ) {
         // Destroy old wayland objects
@@ -251,7 +261,8 @@ impl SeatSelectionState {
 
         *self = SeatSelectionState::ReadMimes {
             data_control_offer,
-            mime_types,
+            ordered_mime_types,
+            unique_mime_types,
             bytes_read,
             fd_from_own_app: HashMap::with_capacity(32),
         };
@@ -261,7 +272,8 @@ impl SeatSelectionState {
     pub(crate) fn got_pipes(&mut self, conn: &mut Connection<State>, pipes: Vec<MimeTypeAndPipe>) {
         let SeatSelectionState::ReadMimes {
             data_control_offer,
-            mime_types: _,
+            ordered_mime_types,
+            unique_mime_types: _,
             bytes_read,
             fd_from_own_app: _,
         } = self
@@ -274,14 +286,16 @@ impl SeatSelectionState {
         data_control_offer.destroy(conn);
 
         *self = SeatSelectionState::GotPipes {
+            ordered_mime_types: std::mem::take(ordered_mime_types),
             pipes,
             bytes_read: *bytes_read,
         };
     }
 
     /// Switches to the [`SeatSelectionState::GotData`] state.
-    pub(crate) fn got_data(&mut self, data: HashMap<Box<CStr>, Box<[u8]>>) {
+    pub(crate) fn got_data(&mut self, ordered_mime_types: Vec<Rc<Box<CStr>>>, data: HashMap<Rc<Box<CStr>>, Box<[u8]>>) {
         let SeatSelectionState::GotPipes {
+            ordered_mime_types: _, // This value will be empty because of std::mem::take
             pipes: _,
             bytes_read: _,
         } = self
@@ -290,7 +304,10 @@ impl SeatSelectionState {
             return;
         };
 
-        *self = SeatSelectionState::GotData { data };
+        *self = SeatSelectionState::GotData {
+            ordered_mime_types,
+            data,
+        };
     }
 
     /// Switches to the [`SeatSelectionState::GotClear`] state.
@@ -315,17 +332,22 @@ impl SeatSelectionState {
             SeatSelectionState::WaitingForNewOffers => {}
             SeatSelectionState::ReadMimes {
                 data_control_offer,
-                mime_types: _,
+                ordered_mime_types: _,
+                unique_mime_types: _,
                 bytes_read: _,
                 fd_from_own_app: _,
             } => {
                 data_control_offer.destroy(conn);
             }
             SeatSelectionState::GotPipes {
+                ordered_mime_types: _,
                 pipes: _,
                 bytes_read: _,
             } => {}
-            SeatSelectionState::GotData { data: _ } => {}
+            SeatSelectionState::GotData {
+                ordered_mime_types: _,
+                data: _,
+            } => {}
             SeatSelectionState::GotClear => {}
             SeatSelectionState::GotIgnoredEvent => {}
         };

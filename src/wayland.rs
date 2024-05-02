@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::ffi::CStr;
 use std::fs::File;
@@ -110,6 +110,7 @@ pub(crate) async fn run(settings: Settings, is_reconnect: bool) -> Result<Infall
                     };
 
                     let SeatSelectionState::GotPipes {
+                        ordered_mime_types: _,
                         pipes: _,
                         bytes_read: _,
                     } = selection_state
@@ -150,12 +151,16 @@ pub(crate) async fn run(settings: Settings, is_reconnect: bool) -> Result<Infall
                                     mime_types_with_data.data_control_device,
                                     mime_types_with_data.selection_state,
                                     mime_types_with_data.selection_type,
+                                    mime_types_with_data.ordered_mime_types,
                                     mime_types_with_data.data,
                                 );
                                 break 'wait false;
                             } else {
                                 // Set clipboard later to avoid data race
-                                mime_types_with_data.selection_state.got_data(mime_types_with_data.data);
+                                mime_types_with_data.selection_state.got_data(
+                                    mime_types_with_data.ordered_mime_types,
+                                    mime_types_with_data.data,
+                                );
                             }
                         }
                         Some(Err(selection_state)) => {
@@ -190,10 +195,15 @@ pub(crate) async fn run(settings: Settings, is_reconnect: bool) -> Result<Infall
                         continue;
                     };
 
-                    let SeatSelectionState::GotData { data } = selection_state else {
+                    let SeatSelectionState::GotData {
+                        ordered_mime_types,
+                        data,
+                    } = selection_state
+                    else {
                         continue;
                     };
 
+                    let owned_ordered_mime_types = std::mem::take(ordered_mime_types);
                     let owned_data = std::mem::take(data);
 
                     set_clipboard(
@@ -203,6 +213,7 @@ pub(crate) async fn run(settings: Settings, is_reconnect: bool) -> Result<Infall
                         data_control_device,
                         selection_state,
                         selection_type,
+                        owned_ordered_mime_types,
                         owned_data,
                     );
                 }
@@ -336,7 +347,8 @@ pub(crate) fn data_control_device_cb(seat_name: u32, event_context: EventCtx<Sta
                     regular_selection.read_mimes(
                         event_context.conn,
                         offer.data_control_offer,
-                        offer.mime_types,
+                        offer.ordered_mime_types,
+                        offer.unique_mime_types,
                         offer.bytes_read,
                     );
                 } else {
@@ -390,7 +402,8 @@ pub(crate) fn data_control_device_cb(seat_name: u32, event_context: EventCtx<Sta
                     primary_selection.read_mimes(
                         event_context.conn,
                         offer.data_control_offer,
-                        offer.mime_types,
+                        offer.ordered_mime_types,
+                        offer.unique_mime_types,
                         offer.bytes_read,
                     );
                 } else {
@@ -464,20 +477,30 @@ fn data_control_offer_cb(
                 return;
             }
 
-            offer.bytes_read += mime_type.as_bytes().len() as u64;
+            let mime_type_bytes = mime_type.as_bytes().len();
+            let boxed_mime_type = mime_type.into_boxed_c_str();
+            let rc_mime_type = if let Some(rc_mime_type) = offer.unique_mime_types.get(&boxed_mime_type) {
+                Rc::clone(rc_mime_type)
+            } else {
+                offer.bytes_read += mime_type_bytes as u64;
 
-            if let Some(selection_size_limit_bytes) = event_context.state.settings.selection_size_limit_bytes {
-                if offer.bytes_read > selection_size_limit_bytes.get() {
-                    log::trace!(
-                        target: &log_seat_target(seat_name),
-                        "New advertised mime type: exceeded specified selection size limit",
-                    );
-                    offer.bytes_exceeded_limit = true;
-                    return;
+                if let Some(selection_size_limit_bytes) = event_context.state.settings.selection_size_limit_bytes {
+                    if offer.bytes_read > selection_size_limit_bytes.get() {
+                        log::trace!(
+                            target: &log_seat_target(seat_name),
+                            "New advertised mime type: exceeded specified selection size limit",
+                        );
+                        offer.bytes_exceeded_limit = true;
+                        return;
+                    }
                 }
-            }
 
-            offer.mime_types.push(mime_type);
+                let rc_mime_type = Rc::new(boxed_mime_type);
+                offer.unique_mime_types.insert(Rc::clone(&rc_mime_type));
+                rc_mime_type
+            };
+
+            offer.ordered_mime_types.push(rc_mime_type);
         }
         fallback => {
             log::debug!(
@@ -505,7 +528,7 @@ fn should_ignore_offer(settings: &Settings, seat_name: u32, selection_type: Sele
         return true;
     }
 
-    if offer.mime_types.is_empty() {
+    if offer.unique_mime_types.is_empty() {
         log::trace!(
             target: &log_seat_target(seat_name),
             "Ignoring {} selection event: no mime types were offered",
@@ -515,7 +538,7 @@ fn should_ignore_offer(settings: &Settings, seat_name: u32, selection_type: Sele
     }
 
     // Log all available mime types.
-    for mime_type in &offer.mime_types {
+    for mime_type in &offer.ordered_mime_types {
         log::trace!(
             target: &log_seat_target(seat_name),
             "Current {} selection event: offered mime types: {:?}",
@@ -526,7 +549,7 @@ fn should_ignore_offer(settings: &Settings, seat_name: u32, selection_type: Sele
 
     if let Some(regex) = settings.all_mime_type_regex.as_ref() {
         // Only keep this offer, if all mime types have a match for this regex.
-        let match_all_regex = offer.mime_types.iter().all(|mime_type| {
+        let match_all_regex = offer.unique_mime_types.iter().all(|mime_type| {
             // TODO: Upstream issue: https://github.com/fancy-regex/fancy-regex/issues/84
             match mime_type.to_str() {
                 Ok(mime_type_as_str) => {
@@ -598,20 +621,20 @@ fn should_ignore_offer(settings: &Settings, seat_name: u32, selection_type: Sele
 ///
 /// # Side effects
 ///
-/// The `mime_types` value is always replaced with
+/// The `unique_mime_types` value is always replaced with
 /// an empty [`Vec`].
 fn create_pipes_for_mime_types(
     connection: &mut Connection<State>,
     seat_name: u32,
     selection_type: SelectionType,
     data_control_offer: ZwlrDataControlOfferV1,
-    mime_types: &mut Vec<std::ffi::CString>,
+    unique_mime_types: &mut HashSet<Rc<Box<CStr>>>,
     fd_from_own_app: &mut HashMap<FdIdentifier, bool>,
     ignore_selection_event_on_error: bool,
 ) -> std::io::Result<Option<Vec<MimeTypeAndPipe>>> {
-    let mut mime_types_and_pipes = Vec::with_capacity(mime_types.len());
+    let mut mime_types_and_pipes = Vec::with_capacity(unique_mime_types.len());
 
-    for mime_type in std::mem::take(mime_types) {
+    for mime_type in std::mem::take(unique_mime_types) {
         // Create a pipe to read the data for each mime type
         let (read, write) = match tokio_pipe::pipe() {
             Ok(pipe_ends) => pipe_ends,
@@ -666,10 +689,10 @@ fn create_pipes_for_mime_types(
         fd_from_own_app.insert(fd_identifier, false);
 
         // We want to receive the data for this mime type
-        data_control_offer.receive(connection, mime_type.clone(), write_file.into());
+        data_control_offer.receive(connection, mime_type.deref().clone().into_c_string(), write_file.into());
 
         mime_types_and_pipes.push(MimeTypeAndPipe {
-            mime_type: mime_type.into_boxed_c_str(),
+            mime_type,
             pipe: read,
             data_read: None,
             read_finished: false,
@@ -709,7 +732,8 @@ async fn handle_new_selection_state(connection: &mut Connection<State>, state: &
                     SeatSelectionState::WaitingForNewOffers => None,
                     SeatSelectionState::ReadMimes {
                         data_control_offer,
-                        mime_types,
+                        ordered_mime_types: _,
+                        unique_mime_types,
                         bytes_read: _,
                         fd_from_own_app,
                     } => {
@@ -718,7 +742,7 @@ async fn handle_new_selection_state(connection: &mut Connection<State>, state: &
                             *seat_name,
                             selection_type,
                             *data_control_offer,
-                            mime_types,
+                            unique_mime_types,
                             fd_from_own_app,
                             state.settings.ignore_selection_event_on_error,
                         );
@@ -738,10 +762,14 @@ async fn handle_new_selection_state(connection: &mut Connection<State>, state: &
                         Some((*seat_name, selection_type, mime_types_with_pipes))
                     }
                     SeatSelectionState::GotPipes {
+                        ordered_mime_types: _,
                         pipes: _,
                         bytes_read: _,
                     } => None,
-                    SeatSelectionState::GotData { data: _ } => None,
+                    SeatSelectionState::GotData {
+                        ordered_mime_types: _,
+                        data: _,
+                    } => None,
                     SeatSelectionState::GotClear => {
                         selection_state.reset(connection);
                         None
@@ -803,7 +831,8 @@ async fn handle_new_selection_state(connection: &mut Connection<State>, state: &
 
             let SeatSelectionState::ReadMimes {
                 data_control_offer: _,
-                mime_types: _,
+                ordered_mime_types: _,
+                unique_mime_types: _,
                 bytes_read: _,
                 fd_from_own_app,
             } = selection_state
@@ -997,6 +1026,10 @@ async fn read_pipes_to_data(
 /// (i.e. [`read_pipes_to_data`] returned [`Ok`]),
 /// the value in [`SeatSelectionState::GotPipes::pipes`]
 /// is replaced with an empty [`Vec`].
+///
+/// If this function returns [`Ok`], the value in
+/// [`SeatSelectionState::GotPipes::ordered_mime_types`]
+/// has been replaced with an empty [`Vec`].
 async fn handle_pipes_selection_state<'a>(
     seat_name: u32,
     data_control_device: ZwlrDataControlDeviceV1,
@@ -1006,7 +1039,12 @@ async fn handle_pipes_selection_state<'a>(
     size_limit: Option<NonZeroU64>,
     ignore_selection_event_on_error: bool,
 ) -> Result<MimeTypesWithData<'a>, &'a mut SeatSelectionState> {
-    let SeatSelectionState::GotPipes { pipes, bytes_read } = selection_state else {
+    let SeatSelectionState::GotPipes {
+        ordered_mime_types,
+        pipes,
+        bytes_read,
+    } = selection_state
+    else {
         unreachable!();
     };
 
@@ -1065,12 +1103,15 @@ async fn handle_pipes_selection_state<'a>(
         return Err(selection_state);
     }
 
+    let owned_ordered_mime_types = std::mem::take(ordered_mime_types);
+
     Ok(MimeTypesWithData {
         seat_name,
         data_control_device,
         selection_offers,
         selection_state,
         selection_type,
+        ordered_mime_types: owned_ordered_mime_types,
         data,
     })
 }
@@ -1121,7 +1162,8 @@ fn data_source_cb(
 
             if let Some(SeatSelectionState::ReadMimes {
                 data_control_offer: _,
-                mime_types: _,
+                ordered_mime_types: _,
+                unique_mime_types: _,
                 bytes_read: _,
                 fd_from_own_app,
             }) = selection_state
@@ -1243,6 +1285,7 @@ fn data_source_cb(
 }
 
 /// Sets the clipboard for a specific seat and selection type.
+#[allow(clippy::too_many_arguments)]
 fn set_clipboard(
     connection: &mut Connection<State>,
     data_control_manager: ZwlrDataControlManagerV1,
@@ -1250,16 +1293,26 @@ fn set_clipboard(
     data_control_device: ZwlrDataControlDeviceV1,
     selection_state: &mut SeatSelectionState,
     selection_type: SelectionType,
-    data: HashMap<Box<CStr>, Box<[u8]>>,
+    ordered_mime_types: Vec<Rc<Box<CStr>>>,
+    data: HashMap<Rc<Box<CStr>>, Box<[u8]>>,
 ) {
-    let data = Arc::new(data);
-    let mime_type_data = Arc::clone(&data);
-    let source = data_control_manager.create_data_source_with_cb(connection, move |event_context| {
-        data_source_cb(seat_name, selection_type, event_context, &data);
-    });
-    for mime_type in mime_type_data.keys() {
-        source.offer(connection, mime_type.clone().into_c_string());
+    let source = data_control_manager.create_data_source(connection);
+    for mime_type in ordered_mime_types {
+        source.offer(connection, mime_type.deref().clone().into_c_string());
     }
+
+    let mut boxed_data = HashMap::with_capacity(data.len());
+    for (key, value) in data {
+        // Now that in the ordered_mime_types loop above all remaining Rc's have been dropped,
+        // the ones in the HashMap should be unique. Therefore, unwrapping Rc::into_inner cannot fail.
+        boxed_data.insert(Rc::into_inner(key).unwrap(), value);
+    }
+
+    let arc_data = Arc::new(boxed_data);
+    connection.set_callback_for(source, move |event_context| {
+        data_source_cb(seat_name, selection_type, event_context, &arc_data);
+    });
+
     let source_id = source.id().as_u32();
 
     match selection_type {
