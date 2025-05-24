@@ -276,6 +276,8 @@ async fn run_with_connection<'a, DataControl: DataControlV1>(
                         ordered_mime_types: _,
                         pipes: _,
                         bytes_read: _,
+                        num_pipes_successfully_read: _,
+                        num_pipes_got_error: _,
                     } = selection_state
                     else {
                         continue;
@@ -941,6 +943,8 @@ async fn handle_new_selection_state<'a, DataControl: DataControlV1>(
                         ordered_mime_types: _,
                         pipes: _,
                         bytes_read: _,
+                        num_pipes_successfully_read: _,
+                        num_pipes_got_error: _,
                     } => None,
                     SeatSelectionState::GotData {
                         ordered_mime_types: _,
@@ -1138,14 +1142,20 @@ async fn read_pipe_to_data<'a>(
 /// Otherwise, if an error occured while reading a pipe, and
 /// the value of `ignore_selection_event_on_error` is false,
 /// the error is saved in the [`MimeTypeAndPipe::data_read`] field.
+#[expect(clippy::too_many_arguments)]
 async fn read_pipes_to_data(
+    seat_name: u32,
+    selection_type: SelectionType,
     pipes: &mut [MimeTypeAndPipe],
     bytes_read: &mut u64,
+    num_pipes_successfully_read: &mut usize,
+    num_pipes_got_error: &mut usize,
     size_limit: Option<NonZeroU64>,
     ignore_selection_event_on_error: bool,
 ) -> Result<(), ReadToDataError> {
     let mut futures = FuturesUnordered::new();
-    let shared_byted_read = Rc::new(RefCell::new(bytes_read));
+    let shared_bytes_read = Rc::new(RefCell::new(bytes_read));
+    let total_pipes = pipes.len();
 
     for mime_type_and_pipe in pipes {
         if mime_type_and_pipe.read_finished {
@@ -1154,22 +1164,35 @@ async fn read_pipes_to_data(
 
         futures.push(read_pipe_to_data(
             mime_type_and_pipe,
-            Rc::clone(&shared_byted_read),
+            Rc::clone(&shared_bytes_read),
             size_limit,
         ));
     }
 
     while let Some(pipe_data_result) = futures.next().await {
         match pipe_data_result.data_result {
-            Ok(_) => {}
+            Ok(()) => {
+                *num_pipes_successfully_read += 1;
+            }
             Err(err) => {
                 if ignore_selection_event_on_error || matches!(err, ReadToDataError::SizeLimitExceeded) {
                     return Err(err);
                 } else {
+                    *num_pipes_got_error += 1;
                     pipe_data_result.mime_type_and_pipe.data_read = Some(Err(err));
                 }
             }
         }
+
+        log::trace!(
+            target: &log_seat_target(seat_name),
+            "{} selection event: finished reading data for mime type {:?} [{} successful + {} error / {} total]",
+            selection_type.get_clipboard_type_str(true),
+            pipe_data_result.mime_type_and_pipe.mime_type,
+            num_pipes_successfully_read,
+            num_pipes_got_error,
+            total_pipes,
+        );
     }
 
     Ok(())
@@ -1225,12 +1248,24 @@ async fn handle_pipes_selection_state<'a, DataControl: DataControlV1>(
         ordered_mime_types,
         pipes,
         bytes_read,
+        num_pipes_successfully_read,
+        num_pipes_got_error,
     } = selection_state
     else {
         unreachable!();
     };
 
-    let data_result = read_pipes_to_data(pipes, bytes_read, size_limit, ignore_selection_event_on_error).await;
+    let data_result = read_pipes_to_data(
+        seat_name,
+        selection_type,
+        pipes,
+        bytes_read,
+        num_pipes_successfully_read,
+        num_pipes_got_error,
+        size_limit,
+        ignore_selection_event_on_error,
+    )
+    .await;
     let data = match data_result {
         Ok(_) => std::mem::take(pipes)
             .into_iter()

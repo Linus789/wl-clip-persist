@@ -273,6 +273,8 @@ pub(crate) enum SeatSelectionState<DataControl: DataControlV1> {
         ordered_mime_types: Vec<Rc<Box<CStr>>>,
         pipes: Vec<MimeTypeAndPipe>,
         bytes_read: u64,
+        num_pipes_successfully_read: usize,
+        num_pipes_got_error: usize,
     },
     /// We got the data, but cannot set the clipboard yet.
     /// We use this state, to minimize the risk of data races.
@@ -344,6 +346,8 @@ impl<DataControl: DataControlV1> SeatSelectionState<DataControl> {
             ordered_mime_types: std::mem::take(ordered_mime_types),
             pipes,
             bytes_read: *bytes_read,
+            num_pipes_successfully_read: 0,
+            num_pipes_got_error: 0,
         };
     }
 
@@ -357,6 +361,8 @@ impl<DataControl: DataControlV1> SeatSelectionState<DataControl> {
             ordered_mime_types: _, // This value will be empty because of std::mem::take
             pipes: _,
             bytes_read: _,
+            num_pipes_successfully_read: _,
+            num_pipes_got_error: _,
         } = self
         else {
             // The state already got updated to something newer, therefore return early
@@ -402,6 +408,8 @@ impl<DataControl: DataControlV1> SeatSelectionState<DataControl> {
                 ordered_mime_types: _,
                 pipes: _,
                 bytes_read: _,
+                num_pipes_successfully_read: _,
+                num_pipes_got_error: _,
             } => {}
             SeatSelectionState::GotData {
                 ordered_mime_types: _,
