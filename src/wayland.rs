@@ -809,13 +809,79 @@ fn create_pipes_for_mime_types<DataControl: DataControlV1>(
     fd_from_own_app: &mut HashMap<FdIdentifier, bool>,
     ignore_selection_event_on_error: bool,
 ) -> std::io::Result<Option<Vec<MimeTypeAndPipe>>> {
+    // Workaround for issue #17 (https://github.com/Linus789/wl-clip-persist/issues/17).
+    // Basically, the fd for this mime type is never closed on Firefox's side and the
+    // mime type seems to be X11 specific, so I think it is okay to ignore it.
+    const HACK_IGNORED_MIME_TYPES: &[&CStr] = &[c"SAVE_TARGETS"];
+
     let mut mime_types_and_pipes = Vec::with_capacity(unique_mime_types.len());
 
-    for mime_type in std::mem::take(unique_mime_types) {
-        // Workaround for issue #17 (https://github.com/Linus789/wl-clip-persist/issues/17).
-        // Basically, the fd for this mime type is never closed on Firefox's side and the
-        // mime type seems to be X11 specific, so I think it is okay to ignore it.
-        const HACK_IGNORED_MIME_TYPES: &[&CStr] = &[c"SAVE_TARGETS"];
+    let mut request_sorted_mime_types = std::mem::take(unique_mime_types).into_iter().collect::<Vec<_>>();
+    request_sorted_mime_types.sort_by_key(|mime_type| {
+        const ORDERED_TEXT_MIME_TYPES: &[(&CStr, u8)] = &{
+            const fn with_indices<const N: usize>(arr: [&'static CStr; N]) -> [(&'static CStr, u8); N] {
+                let mut out = [(c"", 0u8); N];
+                let mut i = 0usize;
+                while i < N {
+                    assert!(i <= u8::MAX as usize);
+                    out[i] = (arr[i], i as u8);
+                    i += 1;
+                }
+                out
+            }
+
+            with_indices([
+                c"text/plain;charset=utf-8",
+                c"text/plain",
+                c"UTF8_STRING",
+                c"COMPOUND_TEXT",
+                c"STRING",
+                c"TEXT",
+            ])
+        };
+        const LAST_SPECIAL_TEXT_KEY: u8 = ORDERED_TEXT_MIME_TYPES.last().unwrap().1;
+        const MIME_TYPE_TEXT_KEY: u8 = LAST_SPECIAL_TEXT_KEY.checked_add(1).unwrap();
+        const MIME_TYPE_UNDERSCORE_TEXT_KEY: u8 = LAST_SPECIAL_TEXT_KEY.checked_add(2).unwrap();
+        const MIME_TYPE_SLASH_KEY: u8 = LAST_SPECIAL_TEXT_KEY.checked_add(3).unwrap();
+        const MIME_TYPE_UNDERSCORE_SLASH_KEY: u8 = LAST_SPECIAL_TEXT_KEY.checked_add(4).unwrap();
+        const FALLBACK_KEY: u8 = u8::MAX.checked_sub(1).unwrap();
+        const {
+            assert!(MIME_TYPE_UNDERSCORE_SLASH_KEY < FALLBACK_KEY);
+        };
+
+        if let Some(&(_, key)) = ORDERED_TEXT_MIME_TYPES
+            .iter()
+            .find(|x| x.0 == mime_type.deref().deref())
+        {
+            return key;
+        }
+
+        let mime_type_as_bytes = mime_type.to_bytes();
+
+        if mime_type_as_bytes.starts_with(b"text/") {
+            if !mime_type_as_bytes.contains(&b'_') {
+                return MIME_TYPE_TEXT_KEY;
+            } else {
+                return MIME_TYPE_UNDERSCORE_TEXT_KEY;
+            }
+        }
+
+        if mime_type_as_bytes.contains(&b'/') {
+            if !mime_type_as_bytes.contains(&b'_') {
+                return MIME_TYPE_SLASH_KEY;
+            } else {
+                return MIME_TYPE_UNDERSCORE_SLASH_KEY;
+            }
+        }
+
+        if HACK_IGNORED_MIME_TYPES.contains(&mime_type.deref().deref()) {
+            return u8::MAX;
+        }
+
+        FALLBACK_KEY
+    });
+
+    for mime_type in request_sorted_mime_types {
         if HACK_IGNORED_MIME_TYPES.contains(&mime_type.deref().deref()) {
             log::trace!(
                 target: &log_seat_target(seat_name),
